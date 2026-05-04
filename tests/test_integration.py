@@ -73,3 +73,18 @@ def test_get_ac_submissions_fix(venue_id):
     if submissions:
         assert "id" in submissions[0]
         assert "title" in submissions[0]
+
+
+def test_get_inbox_summary_integration(venue_id):
+    from openreview_mcp.server import get_inbox_summary
+
+    results = get_inbox_summary(venue_id, since="1d")
+    assert isinstance(results, list)
+
+
+def test_get_invitation_status_integration(venue_id):
+    from openreview_mcp.server import get_invitation_status
+
+    # Use a common invitation that might exist or just check it doesn't crash
+    results = get_invitation_status(venue_id, invitation_suffix="Review_Confirmation")
+    assert isinstance(results, list)

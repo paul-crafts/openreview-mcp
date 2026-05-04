@@ -1,8 +1,61 @@
 import os
+import time
+import re
+from functools import wraps
 from typing import Optional, List, Dict, Any
 from mcp.server.fastmcp import FastMCP
 from openreview.api import OpenReviewClient
+from openreview import OpenReviewException
 from dotenv import load_dotenv
+
+
+# --- Rate Limit Handling ---
+
+
+def retry_on_429(max_retries: int = 5):
+    """Decorator to automatically retry on OpenReview rate limits (429)."""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for i in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    # Check for OpenReviewException with 429 status
+                    is_429 = False
+                    msg = str(e)
+
+                    if isinstance(e, OpenReviewException):
+                        error_data = e.args[0] if e.args else {}
+                        if (
+                            isinstance(error_data, dict)
+                            and error_data.get("status") == 429
+                        ):
+                            is_429 = True
+                            msg = error_data.get("message", "")
+                    elif "429" in msg or "Too Many Requests" in msg:
+                        is_429 = True
+
+                    if is_429:
+                        # Try to parse "Please try again in X seconds"
+                        match = re.search(r"try again in (\d+) seconds", msg)
+                        wait_time = int(match.group(1)) + 1 if match else (30 * (2**i))
+
+                        print(
+                            f"Rate limited by OpenReview. Waiting {wait_time}s before retry {i + 1}/{max_retries}..."
+                        )
+                        time.sleep(wait_time)
+                    else:
+                        raise e
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+# --- Client Management ---
 
 # Load environment variables from .env file if it exists
 load_dotenv()
@@ -14,6 +67,7 @@ mcp = FastMCP("OpenReview MCP")
 _client_instance: Optional[OpenReviewClient] = None
 
 
+@retry_on_429()
 def get_client() -> OpenReviewClient:
     """Get the cached OpenReview API v2 client or create a new one."""
     global _client_instance
@@ -37,6 +91,7 @@ def get_client() -> OpenReviewClient:
 
 
 @mcp.tool()
+@retry_on_429()
 def get_profile() -> Dict[str, Any]:
     """Get the current user's OpenReview profile information."""
     client = get_client()
@@ -45,6 +100,7 @@ def get_profile() -> Dict[str, Any]:
 
 
 @mcp.tool()
+@retry_on_429()
 def list_venues(active_only: bool = True) -> List[Dict[str, str]]:
     """
     List venues where the user has an active role.
@@ -90,6 +146,7 @@ def list_venues(active_only: bool = True) -> List[Dict[str, str]]:
 
 
 @mcp.tool()
+@retry_on_429()
 def search_venues(query: str) -> List[Dict[str, str]]:
     """Search for a venue by name or ID (e.g., 'ICLR')."""
     # Get all venues and filter by query
@@ -99,6 +156,7 @@ def search_venues(query: str) -> List[Dict[str, str]]:
 
 
 @mcp.tool()
+@retry_on_429()
 def get_ac_submissions(venue_id: str) -> List[Dict[str, Any]]:
     """Get submissions assigned to the current user as an Area Chair."""
     client = get_client()
@@ -128,6 +186,7 @@ def get_ac_submissions(venue_id: str) -> List[Dict[str, Any]]:
 
 
 @mcp.tool()
+@retry_on_429()
 def get_review_status_report(venue_id: str) -> List[Dict[str, Any]]:
     """Get a report on review progress for AC-assigned submissions."""
     client = get_client()
@@ -208,6 +267,7 @@ def get_review_status_report(venue_id: str) -> List[Dict[str, Any]]:
 
 
 @mcp.tool()
+@retry_on_429()
 def identify_missing_reviews(venue_id: str) -> List[Dict[str, Any]]:
     """Identify reviewers who haven't submitted their assigned reviews."""
     # This is a refinement of the status report
@@ -220,6 +280,7 @@ def identify_missing_reviews(venue_id: str) -> List[Dict[str, Any]]:
 
 
 @mcp.tool()
+@retry_on_429()
 def get_missing_review_reminders_preview(venue_id: str) -> List[Dict[str, Any]]:
     """Identify which reviewers will receive a reminder (those who haven't submitted)."""
     client = get_client()
@@ -243,6 +304,7 @@ def get_missing_review_reminders_preview(venue_id: str) -> List[Dict[str, Any]]:
 
 
 @mcp.tool()
+@retry_on_429()
 def send_bulk_message(
     venue_id: str,
     recipients: List[str],
@@ -289,6 +351,7 @@ def send_bulk_message(
 
 
 @mcp.tool()
+@retry_on_429()
 def get_submission_details(submission_id: str) -> Dict[str, Any]:
     """Get full details of a submission, including reviews and comments."""
     client = get_client()
@@ -306,6 +369,7 @@ def get_submission_details(submission_id: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@retry_on_429()
 def get_reviewer_assignments(venue_id: str) -> List[Dict[str, Any]]:
     """List submissions the user is assigned to review."""
     client = get_client()
@@ -327,6 +391,7 @@ def get_reviewer_assignments(venue_id: str) -> List[Dict[str, Any]]:
 
 
 @mcp.tool()
+@retry_on_429()
 def get_my_submissions(venue_id: str) -> List[Dict[str, Any]]:
     """List all submissions where the user is an author."""
     client = get_client()
@@ -346,6 +411,7 @@ def get_my_submissions(venue_id: str) -> List[Dict[str, Any]]:
 
 
 @mcp.tool()
+@retry_on_429()
 def search_submissions(venue_id: str, query: str) -> List[Dict[str, Any]]:
     """Search for submissions in a venue by title or abstract keywords."""
     client = get_client()
@@ -364,6 +430,7 @@ def search_submissions(venue_id: str, query: str) -> List[Dict[str, Any]]:
 
 
 @mcp.tool()
+@retry_on_429()
 def get_venue_deadlines(venue_id: str) -> List[Dict[str, Any]]:
     """Get important deadlines for a venue."""
     client = get_client()
@@ -388,6 +455,7 @@ def get_venue_deadlines(venue_id: str) -> List[Dict[str, Any]]:
 
 
 @mcp.tool()
+@retry_on_429()
 def get_server_time() -> Dict[str, Any]:
     """
     Get the current time from the OpenReview server.
@@ -454,6 +522,7 @@ def _summarize_note(note: Any) -> Dict[str, Any]:
         "forum": note.forum,
         "replyto": note.replyto,
         "signatures": note.signatures,
+        "invitations": getattr(note, "invitations", []),
         "readers": note.readers,
         "content": summary_content,
         "cdate": note.cdate,
@@ -461,6 +530,7 @@ def _summarize_note(note: Any) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@retry_on_429()
 def get_ac_updates(
     venue_id: str, since: Optional[str] = None, limit: int = 20
 ) -> List[Dict[str, Any]]:
@@ -493,6 +563,7 @@ def get_ac_updates(
 
 
 @mcp.tool()
+@retry_on_429()
 def get_reviewer_updates(
     venue_id: str, since: Optional[str] = None, limit: int = 20
 ) -> List[Dict[str, Any]]:
@@ -529,6 +600,7 @@ def get_reviewer_updates(
 
 
 @mcp.tool()
+@retry_on_429()
 def get_author_updates(
     venue_id: str, since: Optional[str] = None, limit: int = 20
 ) -> List[Dict[str, Any]]:
@@ -564,6 +636,7 @@ def get_author_updates(
 
 
 @mcp.tool()
+@retry_on_429()
 def get_discussion_updates(venue_id: str, limit: int = 10) -> List[Dict[str, Any]]:
     """Get the most recent comments/rebuttals in assigned forums (for ACs/Reviewers)."""
     # This is now a simplified version of get_ac_updates/get_reviewer_updates combined
@@ -600,6 +673,7 @@ def get_discussion_updates(venue_id: str, limit: int = 10) -> List[Dict[str, Any
 
 
 @mcp.tool()
+@retry_on_429()
 def get_submission_feedback(submission_id: str) -> Dict[str, Any]:
     """Get all visible reviews and comments for a submission (useful for Authors)."""
     # Reuse get_submission_details but we can filter or format specifically for authors
@@ -607,6 +681,7 @@ def get_submission_feedback(submission_id: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@retry_on_429()
 def get_reviewer_emails(
     reviewer_ids: List[str], venue_id: Optional[str] = None
 ) -> Dict[str, str]:
@@ -672,6 +747,7 @@ def get_reviewer_emails(
 
 
 @mcp.tool()
+@retry_on_429()
 def get_inbox_summary(
     venue_id: str, since: Optional[str] = None, limit: int = 50
 ) -> List[Dict[str, Any]]:
@@ -749,6 +825,96 @@ def get_inbox_summary(
 
     summary_list.sort(key=lambda x: x["date"], reverse=True)
     return summary_list[:limit]
+
+
+@mcp.tool()
+@retry_on_429()
+def get_invitation_status(
+    venue_id: str, invitation_suffix: str, role: str = "Reviewers"
+) -> List[Dict[str, Any]]:
+    """
+    Check which participants of a given role have completed a specific invitation.
+    Useful for tracking 'Review_Confirmation', 'Official_Comment', etc.
+    """
+    client = get_client()
+    my_id = client.profile.id
+
+    # Get all papers assigned to me as AC
+    assignments = client.get_all_edges(
+        invitation=f"{venue_id}/Area_Chairs/-/Assignment", tail=my_id
+    )
+    forums = [e.head for e in assignments]
+    if not forums:
+        return []
+
+    # Get submission details (titles and numbers)
+    submissions = client.get_notes_by_ids(ids=forums)
+    forum_to_info = {
+        s.id: {
+            "title": s.content.get("title", {}).get("value")
+            if isinstance(s.content.get("title"), dict)
+            else s.content.get("title"),
+            "number": s.number,
+        }
+        for s in submissions
+    }
+
+    status_report = []
+    for forum_id in forums:
+        info = forum_to_info.get(forum_id, {"title": "Unknown", "number": "?"})
+        paper_number = info["number"]
+
+        # Get all participants of this role for this paper
+        part_edges = client.get_all_edges(
+            invitation=f"{venue_id}/{role}/-/Assignment", head=forum_id
+        )
+        assigned_participants = [e.tail for e in part_edges]
+
+        # Get all notes for this invitation
+        # Some invitations are per forum, some are per paper number
+        try:
+            completed_notes = client.get_all_notes(
+                invitation=f"{venue_id}/Submission{paper_number}/-/{invitation_suffix}"
+            )
+        except Exception:
+            try:
+                completed_notes = client.get_all_notes(
+                    invitation=f"{forum_id}/-/{invitation_suffix}"
+                )
+            except Exception:
+                completed_notes = []
+
+        completed_anonymous_groups = []
+        for n in completed_notes:
+            completed_anonymous_groups.extend(n.signatures)
+
+        # Resolve anonymous groups to their members
+        completed_members = []
+        for anon_id in completed_anonymous_groups:
+            try:
+                # Cache results for performance? No, let's keep it simple for now
+                g = client.get_group(anon_id)
+                completed_members.extend(g.members)
+            except Exception:
+                continue
+
+        # Identify missing
+        missing = []
+        for rid in assigned_participants:
+            if rid not in completed_members:
+                missing.append(rid)
+
+        status_report.append(
+            {
+                "paper_number": info["number"],
+                "title": info["title"],
+                "total_assigned": len(assigned_participants),
+                "completed_count": len(assigned_participants) - len(missing),
+                "missing_participants": missing,
+            }
+        )
+
+    return status_report
 
 
 if __name__ == "__main__":

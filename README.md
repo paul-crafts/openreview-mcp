@@ -13,6 +13,7 @@ A powerful [Model Context Protocol](https://modelcontextprotocol.io/) server for
 - **List Assigned Submissions**: Get details of all papers you are chairing.
 - **Review Status Reports**: Real-time tracking of review progress.
 - **Role-Specific Updates**: Tools for ACs, Reviewers, and Authors to fetch recent forum activity (`get_ac_updates`, etc.).
+- **Inbox Summary**: A high-density, token-efficient summary of all recent activity across assigned papers (`get_inbox_summary`).
 - **Time-Based Filtering**: Use `since='1d'` or `since='2h'` to fetch only the latest updates for automated monitoring.
 - **Targeted Reminders**: Send emails to reviewers with missing assignments.
 - **Get Reviewer Emails**: Retrieve preferred emails (unmasked via message logs when possible).

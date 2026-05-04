@@ -29,3 +29,4 @@ A Model Context Protocol (MCP) server for interacting with OpenReview.net API v2
 - `get_author_updates`: Get new feedback for your own papers (supports `since`).
 - `get_discussion_updates`: See recent comments/rebuttals.
 - `get_server_time`: Check OpenReview server clock for drift synchronization.
+- `get_inbox_summary`: Get a dense, token-efficient summary of all recent activity in assigned forums.

@@ -1,0 +1,23 @@
+[project]
+name = "openreview-mcp"
+version = "0.1.0"
+description = "MCP server for OpenReview, tailored for Area Chairs, Reviewers, and Authors."
+authors = [
+    { name = "Antigravity", email = "antigravity@google.com" }
+]
+dependencies = [
+    "mcp>=0.1.0",
+    "openreview-py>=1.35.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "pytest>=8.0.0",
+    "ruff>=0.3.0"
+]
+requires-python = ">=3.12"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+openreview-mcp = "openreview_mcp.main:main"

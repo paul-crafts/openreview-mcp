@@ -689,29 +689,36 @@ def get_reviewer_emails(
     Get the preferred emails for a list of reviewer profile IDs.
 
     This tool uses a multi-stage approach to unmask emails:
-    1. Direct profile lookup using get_profiles (more permissive than search).
-    2. Fallback to venue-specific Registration notes (common in v2).
-    3. Fallback to recent message delivery logs.
+    1. Direct profile lookup using get_profiles.
+    2. Lookup using Preferred_Email edges (v2 standard).
+    3. Fallback to venue-specific Registration notes (v2).
+    4. Fallback to Tilde group members.
+    5. Fallback to recent message delivery logs.
     """
     client = get_client()
     results = {}
+
+    def extract_email_from_val(val):
+        """Helper to extract email from potential v2 nested value."""
+        if isinstance(val, dict):
+            val = val.get("value")
+        
+        if isinstance(val, list):
+            for e in val:
+                if e and isinstance(e, str) and "@" in e and "****" not in e:
+                    return e
+        elif val and isinstance(val, str) and "@" in val and "****" not in val:
+            return val
+        return None
 
     def extract_email(profile):
         """Helper to extract unmasked email from a profile object."""
         # Try different fields, handling both v1 and v2 (nested) formats
         fields = ["preferredEmail", "emailsConfirmed", "emails"]
         for field in fields:
-            val = profile.content.get(field)
-            # Handle API v2 nested value
-            if isinstance(val, dict):
-                val = val.get("value")
-            
-            if isinstance(val, list):
-                for e in val:
-                    if e and isinstance(e, str) and "****" not in e:
-                        return e
-            elif val and isinstance(val, str) and "****" not in val:
-                return val
+            email = extract_email_from_val(profile.content.get(field))
+            if email:
+                return email
         return None
 
     # 1. Batch lookup profiles (using get_profiles)
@@ -738,8 +745,23 @@ def get_reviewer_emails(
                 except Exception:
                     results[rid] = "Not found"
 
-    # 2. If still masked and venue_id is provided, try Registration notes
-    masked_ids = [rid for rid, email in results.items() if email == "Masked" or email == "Not found"]
+    # 2. Preferred_Email edges (v2 mechanism)
+    # Some venues store preferred emails in edges readable by ACs
+    masked_ids = [rid for rid, email in results.items() if email in ["Masked", "Not found"]]
+    if venue_id and masked_ids:
+        try:
+            # Invitation is typically venue_id/-/Preferred_Email
+            # We try to get all edges and filter locally
+            edges = client.get_all_edges(invitation=f"{venue_id}/-/Preferred_Email")
+            edge_map = {e.tail: e.head for e in edges if e.tail in masked_ids}
+            for rid, email in edge_map.items():
+                if email and "@" in email and "****" not in email:
+                    results[rid] = email
+        except Exception:
+            pass
+
+    # 3. If still masked and venue_id is provided, try Registration notes
+    masked_ids = [rid for rid, email in results.items() if email in ["Masked", "Not found"]]
     if venue_id and masked_ids:
         try:
             # Common registration invitation in v2
@@ -758,27 +780,39 @@ def get_reviewer_emails(
                     )
                 
                 if notes:
-                    reg_email = notes[0].content.get("email")
-                    if isinstance(reg_email, dict):
-                        reg_email = reg_email.get("value")
-                    
-                    if reg_email and "****" not in reg_email:
+                    reg_email = extract_email_from_val(notes[0].content.get("email"))
+                    if reg_email:
                         results[rid] = reg_email
         except Exception:
             pass
 
-    # 3. Final fallback: search message logs
-    masked_ids = [rid for rid, email in results.items() if email == "Masked" or email == "Not found"]
+    # 4. Tilde group members fallback
+    # Tilde groups (~Name1) often contain the email in their members list
+    masked_ids = [rid for rid, email in results.items() if email in ["Masked", "Not found"]]
+    for rid in masked_ids:
+        if rid.startswith("~"):
+            try:
+                group = client.get_group(rid)
+                for member in group.members:
+                    if "@" in member and "****" not in member:
+                        results[rid] = member
+                        break
+            except Exception:
+                pass
+
+    # 5. Final fallback: search message logs
+    masked_ids = [rid for rid, email in results.items() if email in ["Masked", "Not found"]]
     if venue_id and masked_ids:
         try:
-            # Fetch recent messages. We check first 200 messages.
-            for i in range(2):
+            # Fetch recent messages. We check first 300 messages.
+            for i in range(3):
                 messages = client.get_messages(offset=i*100, limit=100)
                 if not messages: break
                 
                 for msg in messages:
                     recipient_email = msg.get("content", {}).get("to")
-                    if not recipient_email or "****" in recipient_email: continue
+                    if not recipient_email or "@" not in recipient_email or "****" in recipient_email:
+                        continue
                     
                     text = msg.get("content", {}).get("text", "")
                     subject = msg.get("content", {}).get("subject", "")

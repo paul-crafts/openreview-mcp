@@ -752,10 +752,10 @@ def get_reviewer_emails(
         try:
             # Invitation is typically venue_id/-/Preferred_Email
             # We try to get all edges and filter locally
-            edges = client.get_all_edges(invitation=f"{venue_id}/-/Preferred_Email")
-            edge_map = {e.tail: e.head for e in edges if e.tail in masked_ids}
+            edges = client.get_all_edges(invitation=f"{venue_id}/-/Preferred_Emails")
+            edge_map = {e.head: e.tail for e in edges if e.head in masked_ids}
             for rid, email in edge_map.items():
-                if email and "@" in email and "****" not in email:
+                if email and "@" in email:
                     results[rid] = email
         except Exception:
             pass

@@ -688,57 +688,104 @@ def get_reviewer_emails(
     """
     Get the preferred emails for a list of reviewer profile IDs.
 
-    This tool uses a multi-stage approach:
-    1. Batch searches profiles for preferred emails.
-    2. If emails are masked (common in v2 API for privacy), it searches recent
-       message logs for the venue to find actual delivery addresses.
+    This tool uses a multi-stage approach to unmask emails:
+    1. Direct profile lookup using get_profiles (more permissive than search).
+    2. Fallback to venue-specific Registration notes (common in v2).
+    3. Fallback to recent message delivery logs.
     """
     client = get_client()
     results = {}
 
-    # 1. Batch lookup profiles
+    def extract_email(profile):
+        """Helper to extract unmasked email from a profile object."""
+        # Try different fields, handling both v1 and v2 (nested) formats
+        fields = ["preferredEmail", "emailsConfirmed", "emails"]
+        for field in fields:
+            val = profile.content.get(field)
+            # Handle API v2 nested value
+            if isinstance(val, dict):
+                val = val.get("value")
+            
+            if isinstance(val, list):
+                for e in val:
+                    if e and isinstance(e, str) and "****" not in e:
+                        return e
+            elif val and isinstance(val, str) and "****" not in val:
+                return val
+        return None
+
+    # 1. Batch lookup profiles (using get_profiles)
     try:
         # split into batches of 50 to be safe
         for i in range(0, len(reviewer_ids), 50):
             batch = reviewer_ids[i : i + 50]
-            profiles = client.search_profiles(ids=batch)
+            # get_profiles is often more permissive than search_profiles for direct IDs
+            profiles = client.get_profiles(id=batch)
             for p in profiles:
-                email = p.content.get("preferredEmail")
-                if email and "****" not in email:
+                email = extract_email(p)
+                if email:
                     results[p.id] = email
                 else:
-                    # Mark as masked or missing for the next stage
-                    results[p.id] = email if email else "Not found"
+                    results[p.id] = "Masked"
     except Exception:
-        # Fallback to individual lookups if search fails
+        # Individual lookup fallback
         for rid in reviewer_ids:
             if rid not in results:
                 try:
                     p = client.get_profile(rid)
-                    email = p.content.get("preferredEmail")
-                    results[rid] = email if email else "Not found"
+                    email = extract_email(p)
+                    results[rid] = email if email else "Masked"
                 except Exception:
-                    results[rid] = "Error"
+                    results[rid] = "Not found"
 
-    # 2. If venue_id is provided, try to unmask using message logs
-    masked_ids = [
-        rid for rid, email in results.items() if "****" in email or email == "Not found"
-    ]
+    # 2. If still masked and venue_id is provided, try Registration notes
+    masked_ids = [rid for rid, email in results.items() if email == "Masked" or email == "Not found"]
     if venue_id and masked_ids:
         try:
-            # Search for messages in this venue
-            messages = client.get_messages(parentGroup=venue_id)
-            # Create a map of name/signature to email from messages
-            for msg in messages:
-                recipient_email = msg.get("content", {}).get("to")
-                text = msg.get("content", {}).get("text", "")
+            # Common registration invitation in v2
+            for rid in masked_ids:
+                # Registration notes usually have an 'email' field in content
+                # and the reviewer is the signature.
+                notes = client.get_all_notes(
+                    invitation=f"{venue_id}/Reviewers/-/Registration",
+                    signature=rid
+                )
+                if not notes:
+                    # Try general Registration if the above is too specific
+                    notes = client.get_all_notes(
+                        invitation=f"{venue_id}/-/Registration",
+                        signature=rid
+                    )
+                
+                if notes:
+                    reg_email = notes[0].content.get("email")
+                    if isinstance(reg_email, dict):
+                        reg_email = reg_email.get("value")
+                    
+                    if reg_email and "****" not in reg_email:
+                        results[rid] = reg_email
+        except Exception:
+            pass
 
-                # Try to match the recipient_email to one of our masked IDs
-                # Delivery logs in v2 often have the profile ID in the signature or metadata
-                # but we can also check if the profile name appears in the text
-                for rid in masked_ids:
-                    if rid in text or rid == msg.get("signature"):
-                        if recipient_email and "****" not in recipient_email:
+    # 3. Final fallback: search message logs
+    masked_ids = [rid for rid, email in results.items() if email == "Masked" or email == "Not found"]
+    if venue_id and masked_ids:
+        try:
+            # Fetch recent messages. We check first 200 messages.
+            for i in range(2):
+                messages = client.get_messages(offset=i*100, limit=100)
+                if not messages: break
+                
+                for msg in messages:
+                    recipient_email = msg.get("content", {}).get("to")
+                    if not recipient_email or "****" in recipient_email: continue
+                    
+                    text = msg.get("content", {}).get("text", "")
+                    subject = msg.get("content", {}).get("subject", "")
+                    
+                    for rid in masked_ids:
+                        # Check if message mentions the ID or was sent to it
+                        if rid in text or rid in subject or rid == msg.get("signature") or rid == msg.get("to"):
                             results[rid] = recipient_email
         except Exception:
             pass

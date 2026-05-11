@@ -315,15 +315,50 @@ def place_bid(
     client = get_client()
     my_id = client.profile.id
     inv_id = f"{venue_id}/{role}/-/Bid"
+    # Fetch invitation to get required readers/writers
+    readers = None
+    writers = None
+    try:
+        invitation = client.get_invitation(inv_id)
+        edge_config = getattr(invitation, "edge", {})
+
+        def resolve_placeholders(group_list):
+            if not isinstance(group_list, list):
+                return group_list
+            resolved = []
+            for g in group_list:
+                if g == "${2/tail}":
+                    resolved.append(my_id)
+                elif g == "${2/head}":
+                    resolved.append(submission_id)
+                elif isinstance(g, str):
+                    resolved.append(g)
+            return resolved
+
+        if "readers" in edge_config:
+            readers = resolve_placeholders(edge_config["readers"])
+        if "writers" in edge_config:
+            writers = resolve_placeholders(edge_config["writers"])
+
+        # Fallback if resolve_placeholders didn't find anything or wasn't a list
+        if not readers:
+            readers = [venue_id, my_id]
+        if not writers:
+            writers = [venue_id, my_id]
+
+    except Exception:
+        # Fallback if invitation not found or structure unexpected
+        readers = [venue_id, my_id]
+        writers = [venue_id, my_id]
 
     # Standard v2 Edge construction
-    # We omit readers and writers to let the server apply the defaults from the invitation.
-    # This is more robust as different venues have different visibility requirements.
     edge = Edge(
         invitation=inv_id,
         head=submission_id,
         tail=my_id,
         label=bid,
+        readers=readers,
+        writers=writers,
         signatures=[my_id],
     )
 

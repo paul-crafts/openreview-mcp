@@ -322,9 +322,17 @@ def place_bid(
         invitation = client.get_invitation(inv_id)
         edge_config = getattr(invitation, "edge", {})
 
-        def resolve_placeholders(group_list):
+        def resolve_placeholders(val):
+            # Extract list from potential dict structure in v2
+            group_list = []
+            if isinstance(val, list):
+                group_list = val
+            elif isinstance(val, dict):
+                group_list = val.get("values", val.get("value", []))
+
             if not isinstance(group_list, list):
-                return group_list
+                return [venue_id, my_id]
+
             resolved = []
             for g in group_list:
                 if g == "${2/tail}":
@@ -368,7 +376,13 @@ def place_bid(
         return {
             "status": "error",
             "message": f"Failed to place bid: {str(e)}",
-            "tip": "Ensure you have the correct role for this bidding invitation and that the readers/writers defined in the invitation are accessible to you.",
+            "details": {
+                "invitation": inv_id,
+                "readers": readers,
+                "writers": writers,
+                "signatures": [my_id],
+            },
+            "tip": "Check if the readers/writers above match what the venue requires. Ensure you are using the correct role (Reviewers vs Area_Chairs).",
         }
 
     return {"status": "success", "bid": bid, "submission_id": submission_id}

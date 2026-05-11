@@ -10,6 +10,7 @@ A powerful [Model Context Protocol](https://modelcontextprotocol.io/) server for
 ## ✨ Features
 
 ### 🏛️ Area Chair Tools
+- **Bidding**: View papers and submit interest before assignments are made.
 - **List Assigned Submissions**: Get details of all papers you are chairing.
 - **Review Status Reports**: Real-time tracking of review progress.
 - **Role-Specific Updates**: Tools for ACs, Reviewers, and Authors to fetch recent forum activity (`get_ac_updates`, etc.).
@@ -20,6 +21,7 @@ A powerful [Model Context Protocol](https://modelcontextprotocol.io/) server for
 - **Safety First**: Built-in `dry_run` and preview modes for all messaging tools.
 
 ### 📝 Reviewer Tools
+- **Bidding**: Express interest in papers you'd like to review.
 - **Assignment Tracking**: List all papers assigned to you for review.
 - **Discussion Updates**: Stay on top of the latest comments and rebuttals in your forums.
 - **Deadline Monitoring**: Never miss a venue milestone.

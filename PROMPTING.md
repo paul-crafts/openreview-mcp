@@ -24,8 +24,16 @@ The primary goal for an AC is to ensure reviews are submitted on time.
    - `send_bulk_message(..., dry_run=True)` to show the final plan.
    - **Wait for user approval** before final send.
 
+2. **Bidding**:
+   - `get_bidding_info(venue_id, role='Area_Chairs')` to see papers and current bids.
+   - `place_bid(venue_id, submission_id, bid, role='Area_Chairs')` to update interest.
+
 ### Reviewer - "The Feedback Provider"
-1. **Assignments**: `get_reviewer_assignments(venue_id)` to see what you need to work on.
+1. **Bidding**:
+   - `get_bidding_info(venue_id)` to list papers for bidding.
+   - `place_bid(venue_id, submission_id, bid)` to set your interest (e.g., 'Very High').
+   - `get_bidding_status(venue_id)` for a summary.
+2. **Assignments**: `get_reviewer_assignments(venue_id)` to see what you need to work on.
 2. **Deadlines**: `get_venue_deadlines(venue_id)` to prioritize tasks.
 3. **Staying Current**: `get_discussion_updates(venue_id)` to check for new author rebuttals or AC comments in your forums.
 

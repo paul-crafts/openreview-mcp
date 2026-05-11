@@ -4,7 +4,7 @@ import re
 from functools import wraps
 from typing import Optional, List, Dict, Any
 from mcp.server.fastmcp import FastMCP
-from openreview.api import OpenReviewClient
+from openreview.api import OpenReviewClient, Edge
 from openreview import OpenReviewException
 from dotenv import load_dotenv
 
@@ -183,6 +183,153 @@ def get_ac_submissions(venue_id: str) -> List[Dict[str, Any]]:
         }
         for s in submissions
     ]
+
+@mcp.tool()
+@retry_on_429()
+def get_bidding_info(
+    venue_id: str, role: str = "Reviewers", limit: int = 50, offset: int = 0
+) -> Dict[str, Any]:
+    """
+    Get papers available for bidding and current bids for the user.
+
+    Args:
+        venue_id: The ID of the venue (e.g., 'collas.org/2026/Conference').
+        role: The role (default: 'Reviewers', can be 'Area_Chairs').
+        limit: Max papers to return (default 50).
+        offset: Pagination offset (default 0).
+    """
+    client = get_client()
+    my_id = client.profile.id
+
+    inv_id = f"{venue_id}/{role}/-/Bid"
+
+    # 1. Get bidding invitation for allowed labels
+    try:
+        invitation = client.get_invitation(inv_id)
+        # Extract labels from invitation (v2 structure)
+        labels = []
+        edge_config = getattr(invitation, "edge", {})
+        if edge_config and "label" in edge_config:
+            labels = edge_config["label"].get("param", {}).get("enum", [])
+
+        if not labels:
+            # Fallback if structure is slightly different or it's v1-like
+            content = getattr(invitation, "content", {})
+            if "label" in content:
+                # Some v2 invitations store params in content
+                label_val = content["label"].get("value", {})
+                if isinstance(label_val, dict):
+                    labels = label_val.get("param", {}).get("enum", [])
+
+        if not labels:
+            # Standard default labels if not found in invitation
+            labels = ["Very High", "High", "Neutral", "Low", "Very Low", "Conflict"]
+    except Exception as e:
+        # If invitation is not found, bidding might not be open
+        return {"error": f"Bidding invitation {inv_id} not found or not open. {str(e)}"}
+
+    # 2. Get current bids
+    current_bids = client.get_all_edges(invitation=inv_id, tail=my_id)
+    bid_map = {edge.head: edge.label for edge in current_bids}
+
+    # 3. Get submissions
+    # Usually venue_id/-/Submission is the invitation for submissions
+    try:
+        submissions = client.get_notes(
+            invitation=f"{venue_id}/-/Submission", limit=limit, offset=offset
+        )
+    except Exception:
+        # Fallback if invitation name is different (e.g. legacy or custom)
+        # Try to find any submission invitation
+        invs = client.get_invitations(venue_id=venue_id)
+        sub_inv = next((i.id for i in invs if i.id.endswith("/Submission")), None)
+        if sub_inv:
+            submissions = client.get_notes(invitation=sub_inv, limit=limit, offset=offset)
+        else:
+            return {"error": "Could not find submission invitation for this venue."}
+
+    papers = []
+    for s in submissions:
+        papers.append(
+            {
+                "id": s.id,
+                "number": s.number,
+                "title": s.content.get("title", {}).get("value", "No Title"),
+                "current_bid": bid_map.get(s.id, "No Bid"),
+            }
+        )
+
+    return {
+        "venue_id": venue_id,
+        "role": role,
+        "allowed_bids": labels,
+        "papers": papers,
+        "total_papers_returned": len(papers),
+    }
+
+
+@mcp.tool()
+@retry_on_429()
+def place_bid(
+    venue_id: str, submission_id: str, bid: str, role: str = "Reviewers"
+) -> Dict[str, Any]:
+    """
+    Place or update a bid for a specific submission.
+
+    Args:
+        venue_id: Venue ID.
+        submission_id: Paper ID (Note ID).
+        bid: The bid label (e.g., 'Very High', 'Neutral').
+        role: Role (default: 'Reviewers').
+    """
+    client = get_client()
+    my_id = client.profile.id
+    inv_id = f"{venue_id}/{role}/-/Bid"
+
+    # Standard v2 Edge construction
+    edge = Edge(
+        invitation=inv_id,
+        head=submission_id,
+        tail=my_id,
+        label=bid,
+        readers=[venue_id, my_id],
+        writers=[venue_id, my_id],
+        signatures=[my_id],
+    )
+
+    client.post_edge(edge)
+    return {"status": "success", "bid": bid, "submission_id": submission_id}
+
+
+@mcp.tool()
+@retry_on_429()
+def get_bidding_status(venue_id: str, role: str = "Reviewers") -> Dict[str, Any]:
+    """Summary of current bids for the venue."""
+    client = get_client()
+    my_id = client.profile.id
+    inv_id = f"{venue_id}/{role}/-/Bid"
+
+    try:
+        bids = client.get_all_edges(invitation=inv_id, tail=my_id)
+    except Exception:
+        return {"error": f"Could not fetch bids for {inv_id}"}
+
+    summary = {}
+    high_interest = []
+
+    for b in bids:
+        label = b.label
+        summary[label] = summary.get(label, 0) + 1
+        if label in ["Very High", "High"]:
+            high_interest.append(b.head)
+
+    return {
+        "venue_id": venue_id,
+        "total_bids": len(bids),
+        "summary": summary,
+        "high_interest_paper_ids": high_interest,
+    }
+
 
 
 @mcp.tool()

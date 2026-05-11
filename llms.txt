@@ -3,8 +3,8 @@
 A Model Context Protocol (MCP) server for interacting with OpenReview.net API v2.
 
 ## Core Capabilities
-- **Area Chair (AC) Tools**: List assigned submissions, get review status reports, identify missing reviews, and send bulk reminders.
-- **Reviewer Tools**: List assignments, track discussion updates, and monitor venue deadlines.
+- **Area Chair (AC) Tools**: Bidding, list assigned submissions, get review status reports, identify missing reviews, and send bulk reminders.
+- **Reviewer Tools**: Bidding (list papers, place bids), list assignments, track discussion updates, and monitor venue deadlines.
 - **Author Tools**: List and track own submissions, retrieve visible feedback (reviews/comments).
 - **General Tools**: Venue discovery (list/search), submission search, and detailed note retrieval.
 
@@ -30,3 +30,6 @@ A Model Context Protocol (MCP) server for interacting with OpenReview.net API v2
 - `get_discussion_updates`: See recent comments/rebuttals.
 - `get_server_time`: Check OpenReview server clock for drift synchronization.
 - `get_inbox_summary`: Get a dense, token-efficient summary of all recent activity in assigned forums.
+- `get_bidding_info`: List papers available for bidding and current user bids.
+- `place_bid`: Submit or update a bid for a paper.
+- `get_bidding_status`: Summary of bidding progress in a venue.

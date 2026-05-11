@@ -233,20 +233,30 @@ def get_bidding_info(
     bid_map = {edge.head: edge.label for edge in current_bids}
 
     # 3. Get submissions
-    # Usually venue_id/-/Submission is the invitation for submissions
-    try:
-        submissions = client.get_notes(
-            invitation=f"{venue_id}/-/Submission", limit=limit, offset=offset
-        )
-    except Exception:
-        # Fallback if invitation name is different (e.g. legacy or custom)
-        # Try to find any submission invitation
-        invs = client.get_invitations(venue_id=venue_id)
-        sub_inv = next((i.id for i in invs if i.id.endswith("/Submission")), None)
-        if sub_inv:
-            submissions = client.get_notes(invitation=sub_inv, limit=limit, offset=offset)
-        else:
-            return {"error": "Could not find submission invitation for this venue."}
+    # Try common submission invitations in order of likelihood
+    sub_inv_patterns = [
+        f"{venue_id}/-/Submission",
+        f"{venue_id}/-/Submission_Note",
+        f"{venue_id}/-/Blind_Submission",
+    ]
+
+    submissions = []
+    error_msg = ""
+    for pattern in sub_inv_patterns:
+        try:
+            submissions = client.get_notes(
+                invitation=pattern, limit=limit, offset=offset
+            )
+            if submissions or limit == 0:
+                break
+        except Exception as e:
+            error_msg = str(e)
+            continue
+
+    if not submissions and limit > 0:
+        return {
+            "error": f"Could not find any submissions for {venue_id}. Tried patterns: {sub_inv_patterns}. Last error: {error_msg}"
+        }
 
     papers = []
     for s in submissions:
@@ -270,6 +280,26 @@ def get_bidding_info(
 
 @mcp.tool()
 @retry_on_429()
+def get_bid_invitation(venue_id: str, role: str = "Reviewers") -> Dict[str, Any]:
+    """
+    Get the bidding invitation configuration, including allowed labels.
+
+    Args:
+        venue_id: Venue ID.
+        role: Role (default: 'Reviewers').
+    """
+    client = get_client()
+    inv_id = f"{venue_id}/{role}/-/Bid"
+
+    try:
+        invitation = client.get_invitation(inv_id)
+        return invitation.to_json()
+    except Exception as e:
+        return {"error": f"Bidding invitation {inv_id} not found. {str(e)}"}
+
+
+@mcp.tool()
+@retry_on_429()
 def place_bid(
     venue_id: str, submission_id: str, bid: str, role: str = "Reviewers"
 ) -> Dict[str, Any]:
@@ -287,17 +317,25 @@ def place_bid(
     inv_id = f"{venue_id}/{role}/-/Bid"
 
     # Standard v2 Edge construction
+    # We omit readers and writers to let the server apply the defaults from the invitation.
+    # This is more robust as different venues have different visibility requirements.
     edge = Edge(
         invitation=inv_id,
         head=submission_id,
         tail=my_id,
         label=bid,
-        readers=[venue_id, my_id],
-        writers=[venue_id, my_id],
         signatures=[my_id],
     )
 
-    client.post_edge(edge)
+    try:
+        client.post_edge(edge)
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to place bid: {str(e)}",
+            "tip": "Ensure you have the correct role for this bidding invitation and that the readers/writers defined in the invitation are accessible to you.",
+        }
+
     return {"status": "success", "bid": bid, "submission_id": submission_id}
 
 

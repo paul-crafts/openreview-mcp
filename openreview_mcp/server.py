@@ -208,9 +208,16 @@ def get_bidding_info(
         invitation = client.get_invitation(inv_id)
         # Extract labels from invitation (v2 structure)
         labels = []
+        # Check invitation.edge
         edge_config = getattr(invitation, "edge", {})
         if edge_config and "label" in edge_config:
             labels = edge_config["label"].get("param", {}).get("enum", [])
+
+        # Check invitation.edit
+        if not labels:
+            edit_config = getattr(invitation, "edit", {})
+            if edit_config and "label" in edit_config:
+                labels = edit_config["label"].get("param", {}).get("enum", [])
 
         if not labels:
             # Fallback if structure is slightly different or it's v1-like
@@ -320,7 +327,10 @@ def place_bid(
     writers = None
     try:
         invitation = client.get_invitation(inv_id)
+        # Check invitation.edge or invitation.edit for v2
         edge_config = getattr(invitation, "edge", {})
+        if not edge_config:
+            edge_config = getattr(invitation, "edit", {})
 
         def resolve_placeholders(val):
             # Extract list from potential dict structure in v2

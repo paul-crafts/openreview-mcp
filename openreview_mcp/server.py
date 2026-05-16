@@ -543,6 +543,33 @@ def get_missing_review_reminders_preview(venue_id: str) -> List[Dict[str, Any]]:
     return targets
 
 
+def _get_submission_contact_info(client, venue_id, submission_number, role="Area_Chair"):
+    """
+    Helper to discover the correct signature and parent group for a submission.
+    In v2, Area Chairs must often sign as their paper-specific anonymized group.
+    """
+    my_id = client.profile.id
+    
+    # 1. Discover the anonymized signature group for this paper
+    # e.g., venue/Submission1/Area_Chair_xxxx
+    sig = my_id
+    try:
+        groups = client.get_groups(
+            prefix=f"{venue_id}/Submission{submission_number}/{role}_",
+            signatory=my_id
+        )
+        if groups:
+            sig = groups[0].id
+    except Exception:
+        pass
+        
+    # 2. Determine the parent group (usually the role group for that submission)
+    # e.g., venue/Submission1/Reviewers
+    parent = f"{venue_id}/Submission{submission_number}/Reviewers"
+    
+    return sig, parent
+
+
 @mcp.tool()
 @retry_on_429()
 def send_reminders(
@@ -555,8 +582,18 @@ def send_reminders(
 ) -> Dict[str, Any]:
     """
     Identify reviewers who haven't submitted their assigned reviews and send them a reminder.
-    Automatically finds the correct per-submission Message invitation.
-    Set dry_run=False to actually send the emails.
+    
+    HINT: This tool automatically handles the complex invitation, anonymized signature, 
+    and parent group requirements for each submission. It is the recommended way for 
+    Area Chairs to send reminders in v2 venues.
+    
+    Args:
+        venue_id: The ID of the venue (e.g., 'collas.org/2026/Conference').
+        subject: Subject line of the email.
+        message: Body text of the email.
+        reply_to: Optional email address for replies.
+        signature: Optional signature. If not provided, it will be auto-discovered (e.g. anonymized AC group).
+        dry_run: If True (default), only previews the messages without sending.
     """
     targets = get_missing_review_reminders_preview(venue_id)
     if not targets:
@@ -576,6 +613,9 @@ def send_reminders(
             sub = client.get_note(sub_id)
             number = sub.number
             
+            # Auto-discover correct signature and parent group for this submission
+            auto_sig, auto_parent = _get_submission_contact_info(client, venue_id, number)
+            
             # Per-submission message invitation usually looks like this
             inv_pattern = f"{venue_id}/Submission{number}/-/Message"
             
@@ -586,8 +626,8 @@ def send_reminders(
                 message=message,
                 reply_to=reply_to,
                 invitation=inv_pattern,
-                signature=signature,
-                parent_group=venue_id,
+                signature=signature or auto_sig,
+                parent_group=auto_parent,
                 dry_run=dry_run
             )
             results.append({
@@ -626,6 +666,12 @@ def send_bulk_message(
 ) -> Dict[str, Any]:
     """
     Send a message to a list of recipients.
+    
+    HINT: In v2 venues, invitations and signatures are often paper-specific. 
+    If invitation/signature are not provided, the tool will attempt to use 
+    the venue's meta-invitation. For paper-specific messages, it is recommended 
+    to use `send_reminders` or specify the params manually.
+    
     Set dry_run=False to actually send the emails.
     """
     client = get_client()
@@ -637,9 +683,9 @@ def send_bulk_message(
             "recipients": recipients,
             "subject": subject,
             "reply_to": reply_to,
-            "invitation": invitation,
-            "signature": signature,
-            "parent_group": parent_group,
+            "invitation": invitation or f"{venue_id}/-/Edit (default fallback)",
+            "signature": signature or f"{client.profile.id} (default)",
+            "parent_group": parent_group or venue_id,
             "body_preview": message[:100] + "..." if len(message) > 100 else message,
         }
 

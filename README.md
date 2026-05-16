@@ -87,10 +87,22 @@ python3 -m openreview_mcp.main sse 8080
 
 The server will be available at `http://127.0.0.1:8080/sse`.
 
+## 📧 Messaging & Reminders
+
+Communication in OpenReview (especially v2) can be complex due to per-submission invitations and anonymized signatures. This server simplifies this:
+
+- **Automatic Reminders**: Use `send_reminders(venue_id="...")`. It will:
+  1. Identify reviewers with missing reviews.
+  2. Auto-discover the correct per-submission invitation (e.g., `Submission5/-/Message`).
+  3. Auto-discover your paper-specific anonymized signature (e.g., `Area_Chair_xxxx`).
+  4. Auto-discover the required `parentGroup` for that submission.
+- **Bulk Messaging**: Use `send_bulk_message` for more general communication. It fallbacks to the venue's meta-invitation if no specific one is provided.
+- **Dry Runs**: Both tools default to `dry_run=True`. Always check the preview output to verify recipients and signatures before sending live.
+
 ## 📖 Best Practices
 
 - **Security**: Always use `dry_run=True` (default) when using `send_bulk_message`.
-- **Anonymity**: Use the appropriate `signature` (e.g., `Area_Chair_xxxx`) when messaging reviewers in double-blind venues.
+- **Anonymity**: The server automatically discovers your anonymized signature in `send_reminders`. If calling `send_bulk_message` manually for a specific paper, ensure you use your paper-specific signature group.
 - **Unmasking**: Use `get_reviewer_emails` with a `venue_id` to attempt to unmask emails using historical message logs if the profile is restricted.
 - **Automation**: Use `get_server_time` to calibrate timestamps when running automated monitoring (e.g., cron jobs) to avoid missing updates due to clock drift.
 

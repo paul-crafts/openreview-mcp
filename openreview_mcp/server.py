@@ -6,7 +6,6 @@ from typing import Optional, List, Dict, Any
 from mcp.server.fastmcp import FastMCP
 from openreview.api import OpenReviewClient, Edge
 from openreview import OpenReviewException
-from dotenv import load_dotenv
 
 
 # --- Rate Limit Handling ---
@@ -56,9 +55,6 @@ def retry_on_429(max_retries: int = 5):
 
 
 # --- Client Management ---
-
-# Load environment variables from .env file if it exists
-load_dotenv()
 
 # Initialize FastMCP
 mcp = FastMCP("OpenReview MCP")
@@ -549,6 +545,74 @@ def get_missing_review_reminders_preview(venue_id: str) -> List[Dict[str, Any]]:
 
 @mcp.tool()
 @retry_on_429()
+def send_reminders(
+    venue_id: str,
+    subject: str,
+    message: str,
+    reply_to: Optional[str] = None,
+    signature: Optional[str] = None,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """
+    Identify reviewers who haven't submitted their assigned reviews and send them a reminder.
+    Automatically finds the correct per-submission Message invitation.
+    Set dry_run=False to actually send the emails.
+    """
+    targets = get_missing_review_reminders_preview(venue_id)
+    if not targets:
+        return {"status": "success", "message": "No missing reviews found. No reminders sent."}
+
+    # Group targets by submission to send one message per paper
+    from collections import defaultdict
+    by_submission = defaultdict(list)
+    for t in targets:
+        by_submission[t["submission_id"]].append(t["reviewer"])
+        
+    results = []
+    client = get_client()
+    for sub_id, reviewers in by_submission.items():
+        # Get the submission number to build the invitation
+        try:
+            sub = client.get_note(sub_id)
+            number = sub.number
+            
+            # Per-submission message invitation usually looks like this
+            inv_pattern = f"{venue_id}/Submission{number}/-/Message"
+            
+            res = send_bulk_message(
+                venue_id=venue_id,
+                recipients=reviewers,
+                subject=subject,
+                message=message,
+                reply_to=reply_to,
+                invitation=inv_pattern,
+                signature=signature,
+                parent_group=venue_id,
+                dry_run=dry_run
+            )
+            results.append({
+                "submission_id": sub_id,
+                "submission_number": number,
+                "reviewers": reviewers,
+                "result": res
+            })
+        except Exception as e:
+             results.append({
+                "submission_id": sub_id,
+                "reviewers": reviewers,
+                "result": {"status": "error", "message": str(e)}
+            })
+
+    return {
+        "status": "success",
+        "dry_run": dry_run,
+        "reminders_sent": len(results),
+        "details": results
+    }
+
+
+@mcp.tool()
+@retry_on_429()
 def send_bulk_message(
     venue_id: str,
     recipients: List[str],
@@ -579,6 +643,10 @@ def send_bulk_message(
             "body_preview": message[:100] + "..." if len(message) > 100 else message,
         }
 
+    # Default to the meta-invitation if none is provided, as required by OpenReview API v2
+    if not invitation:
+        invitation = f"{venue_id}/-/Edit"
+
     try:
         response = client.post_message(
             subject=subject,
@@ -591,7 +659,13 @@ def send_bulk_message(
         )
         return {"status": "success", "response": response}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        error_msg = str(e)
+        if "MissingRequiredError" in error_msg and "invitation" in error_msg:
+            return {
+                "status": "error",
+                "message": f"API error: {error_msg}. The default fallback ({venue_id}/-/Edit) might not exist. Please provide a specific invitation ID.",
+            }
+        return {"status": "error", "message": error_msg}
 
 
 @mcp.tool()

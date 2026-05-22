@@ -180,6 +180,7 @@ def get_ac_submissions(venue_id: str) -> List[Dict[str, Any]]:
         for s in submissions
     ]
 
+
 @mcp.tool()
 @retry_on_429()
 def get_bidding_info(
@@ -424,7 +425,6 @@ def get_bidding_status(venue_id: str, role: str = "Reviewers") -> Dict[str, Any]
     }
 
 
-
 @mcp.tool()
 @retry_on_429()
 def get_review_status_report(venue_id: str) -> List[Dict[str, Any]]:
@@ -543,30 +543,31 @@ def get_missing_review_reminders_preview(venue_id: str) -> List[Dict[str, Any]]:
     return targets
 
 
-def _get_submission_contact_info(client, venue_id, submission_number, role="Area_Chair"):
+def _get_submission_contact_info(
+    client, venue_id, submission_number, role="Area_Chair"
+):
     """
     Helper to discover the correct signature and parent group for a submission.
     In v2, Area Chairs must often sign as their paper-specific anonymized group.
     """
     my_id = client.profile.id
-    
+
     # 1. Discover the anonymized signature group for this paper
     # e.g., venue/Submission1/Area_Chair_xxxx
     sig = my_id
     try:
         groups = client.get_groups(
-            prefix=f"{venue_id}/Submission{submission_number}/{role}_",
-            signatory=my_id
+            prefix=f"{venue_id}/Submission{submission_number}/{role}_", signatory=my_id
         )
         if groups:
             sig = groups[0].id
     except Exception:
         pass
-        
+
     # 2. Determine the parent group (usually the role group for that submission)
     # e.g., venue/Submission1/Reviewers
     parent = f"{venue_id}/Submission{submission_number}/Reviewers"
-    
+
     return sig, parent
 
 
@@ -582,11 +583,11 @@ def send_reminders(
 ) -> Dict[str, Any]:
     """
     Identify reviewers who haven't submitted their assigned reviews and send them a reminder.
-    
-    HINT: This tool automatically handles the complex invitation, anonymized signature, 
-    and parent group requirements for each submission. It is the recommended way for 
+
+    HINT: This tool automatically handles the complex invitation, anonymized signature,
+    and parent group requirements for each submission. It is the recommended way for
     Area Chairs to send reminders in v2 venues.
-    
+
     Args:
         venue_id: The ID of the venue (e.g., 'collas.org/2026/Conference').
         subject: Subject line of the email.
@@ -597,14 +598,18 @@ def send_reminders(
     """
     targets = get_missing_review_reminders_preview(venue_id)
     if not targets:
-        return {"status": "success", "message": "No missing reviews found. No reminders sent."}
+        return {
+            "status": "success",
+            "message": "No missing reviews found. No reminders sent.",
+        }
 
     # Group targets by submission to send one message per paper
     from collections import defaultdict
+
     by_submission = defaultdict(list)
     for t in targets:
         by_submission[t["submission_id"]].append(t["reviewer"])
-        
+
     results = []
     client = get_client()
     for sub_id, reviewers in by_submission.items():
@@ -612,13 +617,15 @@ def send_reminders(
         try:
             sub = client.get_note(sub_id)
             number = sub.number
-            
+
             # Auto-discover correct signature and parent group for this submission
-            auto_sig, auto_parent = _get_submission_contact_info(client, venue_id, number)
-            
+            auto_sig, auto_parent = _get_submission_contact_info(
+                client, venue_id, number
+            )
+
             # Per-submission message invitation usually looks like this
             inv_pattern = f"{venue_id}/Submission{number}/-/Message"
-            
+
             res = send_bulk_message(
                 venue_id=venue_id,
                 recipients=reviewers,
@@ -628,26 +635,30 @@ def send_reminders(
                 invitation=inv_pattern,
                 signature=signature or auto_sig,
                 parent_group=auto_parent,
-                dry_run=dry_run
+                dry_run=dry_run,
             )
-            results.append({
-                "submission_id": sub_id,
-                "submission_number": number,
-                "reviewers": reviewers,
-                "result": res
-            })
+            results.append(
+                {
+                    "submission_id": sub_id,
+                    "submission_number": number,
+                    "reviewers": reviewers,
+                    "result": res,
+                }
+            )
         except Exception as e:
-             results.append({
-                "submission_id": sub_id,
-                "reviewers": reviewers,
-                "result": {"status": "error", "message": str(e)}
-            })
+            results.append(
+                {
+                    "submission_id": sub_id,
+                    "reviewers": reviewers,
+                    "result": {"status": "error", "message": str(e)},
+                }
+            )
 
     return {
         "status": "success",
         "dry_run": dry_run,
         "reminders_sent": len(results),
-        "details": results
+        "details": results,
     }
 
 
@@ -666,12 +677,12 @@ def send_bulk_message(
 ) -> Dict[str, Any]:
     """
     Send a message to a list of recipients.
-    
-    HINT: In v2 venues, invitations and signatures are often paper-specific. 
-    If invitation/signature are not provided, the tool will attempt to use 
-    the venue's meta-invitation. For paper-specific messages, it is recommended 
+
+    HINT: In v2 venues, invitations and signatures are often paper-specific.
+    If invitation/signature are not provided, the tool will attempt to use
+    the venue's meta-invitation. For paper-specific messages, it is recommended
     to use `send_reminders` or specify the params manually.
-    
+
     Set dry_run=False to actually send the emails.
     """
     client = get_client()
@@ -1066,7 +1077,7 @@ def get_reviewer_emails(
         """Helper to extract email from potential v2 nested value."""
         if isinstance(val, dict):
             val = val.get("value")
-        
+
         if isinstance(val, list):
             for e in val:
                 if e and isinstance(e, str) and "@" in e and "****" not in e:
@@ -1111,7 +1122,9 @@ def get_reviewer_emails(
 
     # 2. Preferred_Email edges (v2 mechanism)
     # Some venues store preferred emails in edges readable by ACs
-    masked_ids = [rid for rid, email in results.items() if email in ["Masked", "Not found"]]
+    masked_ids = [
+        rid for rid, email in results.items() if email in ["Masked", "Not found"]
+    ]
     if venue_id and masked_ids:
         try:
             # Invitation is typically venue_id/-/Preferred_Email
@@ -1125,7 +1138,9 @@ def get_reviewer_emails(
             pass
 
     # 3. If still masked and venue_id is provided, try Registration notes
-    masked_ids = [rid for rid, email in results.items() if email in ["Masked", "Not found"]]
+    masked_ids = [
+        rid for rid, email in results.items() if email in ["Masked", "Not found"]
+    ]
     if venue_id and masked_ids:
         try:
             # Common registration invitation in v2
@@ -1133,16 +1148,14 @@ def get_reviewer_emails(
                 # Registration notes usually have an 'email' field in content
                 # and the reviewer is the signature.
                 notes = client.get_all_notes(
-                    invitation=f"{venue_id}/Reviewers/-/Registration",
-                    signature=rid
+                    invitation=f"{venue_id}/Reviewers/-/Registration", signature=rid
                 )
                 if not notes:
                     # Try general Registration if the above is too specific
                     notes = client.get_all_notes(
-                        invitation=f"{venue_id}/-/Registration",
-                        signature=rid
+                        invitation=f"{venue_id}/-/Registration", signature=rid
                     )
-                
+
                 if notes:
                     reg_email = extract_email_from_val(notes[0].content.get("email"))
                     if reg_email:
@@ -1152,7 +1165,9 @@ def get_reviewer_emails(
 
     # 4. Tilde group members fallback
     # Tilde groups (~Name1) often contain the email in their members list
-    masked_ids = [rid for rid, email in results.items() if email in ["Masked", "Not found"]]
+    masked_ids = [
+        rid for rid, email in results.items() if email in ["Masked", "Not found"]
+    ]
     for rid in masked_ids:
         if rid.startswith("~"):
             try:
@@ -1165,25 +1180,37 @@ def get_reviewer_emails(
                 pass
 
     # 5. Final fallback: search message logs
-    masked_ids = [rid for rid, email in results.items() if email in ["Masked", "Not found"]]
+    masked_ids = [
+        rid for rid, email in results.items() if email in ["Masked", "Not found"]
+    ]
     if venue_id and masked_ids:
         try:
             # Fetch recent messages. We check first 300 messages.
             for i in range(3):
-                messages = client.get_messages(offset=i*100, limit=100)
-                if not messages: break
-                
+                messages = client.get_messages(offset=i * 100, limit=100)
+                if not messages:
+                    break
+
                 for msg in messages:
                     recipient_email = msg.get("content", {}).get("to")
-                    if not recipient_email or "@" not in recipient_email or "****" in recipient_email:
+                    if (
+                        not recipient_email
+                        or "@" not in recipient_email
+                        or "****" in recipient_email
+                    ):
                         continue
-                    
+
                     text = msg.get("content", {}).get("text", "")
                     subject = msg.get("content", {}).get("subject", "")
-                    
+
                     for rid in masked_ids:
                         # Check if message mentions the ID or was sent to it
-                        if rid in text or rid in subject or rid == msg.get("signature") or rid == msg.get("to"):
+                        if (
+                            rid in text
+                            or rid in subject
+                            or rid == msg.get("signature")
+                            or rid == msg.get("to")
+                        ):
                             results[rid] = recipient_email
         except Exception:
             pass
@@ -1360,6 +1387,106 @@ def get_invitation_status(
         )
 
     return status_report
+
+
+@mcp.tool()
+@retry_on_429()
+def download_batch_pdfs(
+    venue_id: str,
+    role: str = "Reviewers",
+    output_dir: Optional[str] = None,
+    delay: float = 1.0,
+) -> Dict[str, Any]:
+    """
+    Batch download all PDFs for papers assigned to the user as an Area Chair or Reviewer.
+    Includes proactive delays between downloads to prevent hitting OpenReview rate limits.
+
+    Args:
+        venue_id: The ID of the venue (e.g., 'collas.org/2026/Conference').
+        role: The role, either 'Reviewers' (default) or 'Area_Chairs' (also accepts 'Area_Chair', 'AC', 'Reviewer').
+        output_dir: Directory where PDFs will be saved. Defaults to 'downloads/<venue_id>/<role>' under current workspace.
+        delay: Proactive delay in seconds between consecutive PDF downloads (default: 1.0s).
+    """
+    client = get_client()
+    my_id = client.profile.id
+
+    # Normalize role
+    normalized_role = role.lower().strip()
+    if normalized_role in ["ac", "area_chair", "area_chairs"]:
+        role_name = "Area_Chairs"
+    elif normalized_role in ["reviewer", "reviewers"]:
+        role_name = "Reviewers"
+    else:
+        role_name = role
+
+    # Get assignments
+    invitation = f"{venue_id}/{role_name}/-/Assignment"
+    assignments = client.get_all_edges(invitation=invitation, tail=my_id)
+    submission_ids = [edge.head for edge in assignments]
+
+    if not submission_ids:
+        return {
+            "status": "success",
+            "message": f"No assignments found for role '{role_name}' in venue '{venue_id}'.",
+            "downloaded": [],
+            "failed": [],
+        }
+
+    # Fetch notes for these submissions
+    submissions = [client.get_note(sid) for sid in submission_ids]
+
+    # Resolve output directory
+    if not output_dir:
+        # Sanitize venue_id for folder naming
+        safe_venue = re.sub(r"[^a-zA-Z0-9_\-]", "_", venue_id)
+        output_dir = os.path.join("downloads", safe_venue, role_name)
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    downloaded = []
+    failed = []
+
+    for i, s in enumerate(submissions):
+        title = s.content.get("title", {}).get("value", "No Title")
+        number = s.number
+
+        # Sanitize title for filename
+        clean_title = re.sub(r"[^a-zA-Z0-9_\-\s]", "", title)
+        clean_title = re.sub(r"\s+", "_", clean_title).strip()
+        filename = f"paper_{number}_{clean_title[:50]}.pdf"
+        file_path = os.path.join(output_dir, filename)
+
+        # Proactive delay to avoid rate limit
+        if i > 0 and delay > 0:
+            time.sleep(delay)
+
+        try:
+            # Download PDF binary content
+            pdf_data = client.get_pdf(id=s.id)
+
+            with open(file_path, "wb") as f:
+                f.write(pdf_data)
+
+            downloaded.append(
+                {
+                    "id": s.id,
+                    "number": number,
+                    "title": title,
+                    "file_path": os.path.abspath(file_path),
+                }
+            )
+        except Exception as e:
+            failed.append(
+                {"id": s.id, "number": number, "title": title, "error": str(e)}
+            )
+
+    return {
+        "status": "completed",
+        "message": f"Batch download completed. Successful: {len(downloaded)}, Failed: {len(failed)}",
+        "output_dir": os.path.abspath(output_dir),
+        "downloaded": downloaded,
+        "failed": failed,
+    }
 
 
 if __name__ == "__main__":

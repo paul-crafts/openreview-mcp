@@ -97,12 +97,15 @@ def test_get_reviewer_emails_unmasking(mock_client):
     mock_profile = MagicMock()
     mock_profile.id = "~Reviewer1"
     mock_profile.content = {"preferredEmail": "rev****@gmail.com"}
-    mock_client.search_profiles.return_value = [mock_profile]
+    mock_client.get_profiles.return_value = [mock_profile]
+    mock_client.get_all_notes.return_value = []
+    mock_client.get_group.side_effect = Exception("Not found")
 
     # Mock message log for unmasking
     mock_msg = {
         "content": {"to": "actual_email@gmail.com", "text": "Dear ~Reviewer1..."},
         "signature": "~Reviewer1",
+        "to": "~Reviewer1",
     }
     mock_client.get_messages.return_value = [mock_msg]
 
@@ -114,7 +117,6 @@ def test_get_reviewer_emails_unmasking(mock_client):
 def test_retry_on_429():
     from openreview_mcp.server import retry_on_429
     from openreview import OpenReviewException
-    import time
 
     # Mock time.sleep to avoid waiting during tests
     with patch("time.sleep") as mock_sleep:

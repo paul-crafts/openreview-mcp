@@ -44,5 +44,6 @@ The primary goal for an AC is to ensure reviews are submitted on time.
 ## 💡 Pro Tips
 
 - **Venue IDs**: OpenReview Venue IDs usually look like `ICLR.cc/2025/Conference`. If a user says "ICLR 2025", use `search_venues("ICLR")` first to find the exact ID.
+- **Discovering Tasks & Statuses**: To find out if a specific task (e.g., 'Rebuttal Acknowledgement', 'Meta Review') is available or has been completed, use `get_venue_invitation_types(venue_id)` to find the exact invitation suffix (e.g., 'Rebuttal_Acknowledgement'). Then, use `get_invitation_status(venue_id, "Rebuttal_Acknowledgement")` to see which users have completed it.
 - **Anonymity**: Be aware that many venues are double-blind. Signatures like `~Reviewer1` or `(Anonymized)` are normal. Don't try to "de-anonymize" participants.
 - **Data Limits**: `get_discussion_updates` takes a `limit` parameter. Default is 10. Use higher values if the venue is very active.

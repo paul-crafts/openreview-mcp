@@ -662,6 +662,21 @@ def send_reminders(
     }
 
 
+@mcp.prompt()
+def openreview_instructions() -> str:
+    """
+    Get the official prompting instructions and best practices for the OpenReview MCP.
+    Agents should read this to understand role-based workflows and Pro Tips.
+    """
+    try:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        prompt_path = os.path.join(base_dir, "PROMPTING.md")
+        with open(prompt_path, "r") as f:
+            return f.read()
+    except Exception as e:
+        return f"Error reading PROMPTING.md: {e}"
+
+
 @mcp.tool()
 @retry_on_429()
 def send_bulk_message(
@@ -831,6 +846,27 @@ def get_venue_deadlines(venue_id: str) -> List[Dict[str, Any]]:
 
 @mcp.tool()
 @retry_on_429()
+def get_venue_invitation_types(venue_id: str) -> List[str]:
+    """
+    Get all unique invitation suffixes (types) available for a venue.
+    This helps discover the exact names of tasks (e.g., 'Review', 'Official_Comment', 'Rebuttal_Acknowledgement').
+    """
+    client = get_client()
+    invitations = client.get_all_invitations(prefix=f"{venue_id}/")
+    
+    suffixes = set()
+    for inv in invitations:
+        parts = inv.id.split('/-/')
+        if len(parts) > 1:
+            suffixes.add(parts[-1])
+        else:
+            suffixes.add(inv.id.split('/')[-1])
+            
+    return sorted(list(suffixes))
+
+
+@mcp.tool()
+@retry_on_429()
 def get_server_time() -> Dict[str, Any]:
     """
     Get the current time from the OpenReview server.
@@ -965,7 +1001,7 @@ def get_reviewer_updates(
             # Reviewers should see new comments/rebuttals
             invs = getattr(n, "invitations", [])
             if any(
-                "Comment" in inv or "Rebuttal" in inv or "Decision" in inv
+                "Comment" in inv or "Rebuttal" in inv or "Decision" in inv or "Acknowledgement" in inv or "Acknowledgment" in inv
                 for inv in invs
             ):
                 updates.append(_summarize_note(n))
@@ -1037,7 +1073,7 @@ def get_discussion_updates(venue_id: str, limit: int = 10) -> List[Dict[str, Any
         for n in notes:
             invs = getattr(n, "invitations", [])
             if any(
-                "/-/" in inv and ("Comment" in inv or "Rebuttal" in inv) for inv in invs
+                "/-/" in inv and ("Comment" in inv or "Rebuttal" in inv or "Acknowledgement" in inv or "Acknowledgment" in inv) for inv in invs
             ):
                 all_notes.append(n)
 
@@ -1387,6 +1423,25 @@ def get_invitation_status(
         )
 
     return status_report
+
+
+@mcp.tool()
+@retry_on_429()
+def get_rebuttal_acknowledgement_status(venue_id: str) -> List[Dict[str, Any]]:
+    """
+    Check which reviewers have completed the Rebuttal Acknowledgement.
+    This is a convenience wrapper that automatically detects the correct 
+    invitation name (e.g., Rebuttal_Acknowledgement vs Rebuttal_Acknowledgment).
+    """
+    report1 = get_invitation_status(venue_id=venue_id, invitation_suffix="Rebuttal_Acknowledgement")
+    report2 = get_invitation_status(venue_id=venue_id, invitation_suffix="Rebuttal_Acknowledgment")
+    
+    total_completed1 = sum(r.get("completed_count", 0) for r in report1)
+    total_completed2 = sum(r.get("completed_count", 0) for r in report2)
+    
+    if total_completed2 > total_completed1:
+        return report2
+    return report1
 
 
 @mcp.tool()

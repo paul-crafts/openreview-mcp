@@ -176,6 +176,7 @@ def get_ac_submissions(venue_id: str) -> List[Dict[str, Any]]:
             "title": s.content.get("title", {}).get("value", "No Title"),
             "number": s.number,
             "forum": s.forum,
+            "is_withdrawn": "Withdrawn_Submission" in str(s.content.get("venueid", {}).get("value", "")),
         }
         for s in submissions
     ]
@@ -774,7 +775,12 @@ def get_reviewer_assignments(venue_id: str) -> List[Dict[str, Any]]:
         return []
 
     submissions = [client.get_note(sid) for sid in submission_ids]
-    return [s.to_json() for s in submissions]
+    results = []
+    for s in submissions:
+        data = s.to_json()
+        data["is_withdrawn"] = "Withdrawn_Submission" in str(s.content.get("venueid", {}).get("value", ""))
+        results.append(data)
+    return results
 
 
 # --- Author Tools ---
@@ -1379,18 +1385,17 @@ def get_invitation_status(
         assigned_participants = [e.tail for e in part_edges]
 
         # Get all notes for this invitation
-        # Some invitations are per forum, some are per paper number
+        # We fetch all notes in the forum and filter locally to handle deeply nested
+        # invitation paths (e.g., Submission5/Official_Review1/Rebuttal1/-/Rebuttal_Acknowledgement)
         try:
-            completed_notes = client.get_all_notes(
-                invitation=f"{venue_id}/Submission{paper_number}/-/{invitation_suffix}"
-            )
+            all_forum_notes = client.get_all_notes(forum=forum_id)
+            completed_notes = []
+            for n in all_forum_notes:
+                invs = getattr(n, "invitations", [])
+                if any(f"/-/{invitation_suffix}" in inv for inv in invs):
+                    completed_notes.append(n)
         except Exception:
-            try:
-                completed_notes = client.get_all_notes(
-                    invitation=f"{forum_id}/-/{invitation_suffix}"
-                )
-            except Exception:
-                completed_notes = []
+            completed_notes = []
 
         completed_anonymous_groups = []
         for n in completed_notes:

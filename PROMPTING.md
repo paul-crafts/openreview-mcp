@@ -24,6 +24,11 @@ The primary goal for an AC is to ensure reviews are submitted on time.
    - `send_bulk_message(..., dry_run=True)` to show the final plan.
    - **Wait for user approval** before final send.
 
+5. **Emergency Reviewers**:
+   - Use `get_top_10_emergency_reviewers(venue_id, forum_id)` to find the best available reviewers for a paper based on affinity score, quota, and recent publications (uses OpenReview data natively with a Scholar fallback).
+   - Summarize the candidates and their recent publications for the user to make a selection.
+   - Once the user selects the best candidate, use `invite_reviewer(venue_id, forum_id, reviewer_id)` to officially send the invitation.
+
 2. **Bidding**:
    - `get_bidding_info(venue_id, role='Area_Chairs')` to see papers and current bids.
    - `place_bid(venue_id, submission_id, bid, role='Area_Chairs')` to update interest.

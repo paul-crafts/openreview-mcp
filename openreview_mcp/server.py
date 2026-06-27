@@ -6,6 +6,7 @@ from typing import Optional, List, Dict, Any
 from mcp.server.fastmcp import FastMCP
 from openreview.api import OpenReviewClient, Edge
 from openreview import OpenReviewException
+import openreview.tools
 
 
 # --- Rate Limit Handling ---
@@ -1547,6 +1548,141 @@ def download_batch_pdfs(
         "downloaded": downloaded,
         "failed": failed,
     }
+
+
+@mcp.tool()
+@retry_on_429()
+def get_top_10_emergency_reviewers(venue_id: str, forum_id: str) -> Dict[str, List[str]]:
+    """
+    Find the top-10 reviewers with the highest affinity for a given paper that haven't reached their reviewing quota.
+    Returns a mapping of {reviewer_profile_id: [recent_paper_titles_from_openreview]}.
+    """
+    client = get_client()
+
+    # 1. Fetch Affinity Scores for this paper
+    affinity_edges = client.get_edges(
+        invitation=f"{venue_id}/Reviewers/-/Affinity_Score",
+        head=forum_id,
+        sort="weight:desc",
+        limit=100
+    )
+    
+    if not affinity_edges:
+        return {}
+
+    # 2. Fetch Reviewer Quotas
+    max_papers_edges = client.get_all_edges(
+        invitation=f"{venue_id}/Reviewers/-/Custom_Max_Papers"
+    )
+    quota_map = {e.tail: int(e.weight) for e in max_papers_edges if e.weight is not None}
+    DEFAULT_QUOTA = 5
+    
+    top_10_reviewers = []
+    candidate_ids = [e.tail for e in affinity_edges]
+    
+    for candidate_id in candidate_ids:
+        if len(top_10_reviewers) >= 10:
+            break
+            
+        assignments = client.get_edges(
+            invitation=f"{venue_id}/Reviewers/-/Assignment",
+            tail=candidate_id
+        )
+        current_load = len(assignments)
+        candidate_quota = quota_map.get(candidate_id, DEFAULT_QUOTA)
+        
+        if current_load < candidate_quota:
+            top_10_reviewers.append(candidate_id)
+            
+    if not top_10_reviewers:
+        return {}
+        
+    # 3. Fetch profiles and recent publications
+    profiles = openreview.tools.get_profiles(client, ids_or_emails=top_10_reviewers, with_publications=True)
+    
+    result = {}
+    for profile in profiles:
+        profile_id = profile.id
+        pubs = profile.content.get('publications', [])
+        # Sort by creation date or publication date
+        pubs.sort(key=lambda x: x.get('cdate') or x.get('pdate') or 0, reverse=True)
+        recent_pubs = pubs[:20]
+        
+        # Check if they have recent papers (from 2025 onwards)
+        has_recent = False
+        YEAR_2025_MS = 1735689600000
+        for p in recent_pubs:
+            if (p.get('cdate') or 0) >= YEAR_2025_MS or (p.get('pdate') or 0) >= YEAR_2025_MS:
+                has_recent = True
+                break
+                
+        titles = [p.get('content', {}).get('title', 'Unknown Title') for p in recent_pubs]
+        
+        # Fallback to Google Scholar if no recent papers
+        if not has_recent:
+            import urllib.parse
+            import requests
+            import time
+            import re
+            
+            names = profile.content.get('names', [])
+            if names:
+                preferred = next((n for n in names if n.get('preferred')), names[0])
+                first = preferred.get('first', '')
+                last = preferred.get('last', '')
+                author_query = f"{first} {last}".strip()
+                
+                if author_query:
+                    url = f'https://scholar.google.com/scholar?hl=en&q=author:"{urllib.parse.quote_plus(author_query)}"&as_ylo=2025'
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    }
+                    try:
+                        time.sleep(5)  # Big delay to avoid rate limits as requested
+                        r = requests.get(url, headers=headers, timeout=10)
+                        if r.status_code == 200:
+                            for match in re.finditer(r'<h3 class="gs_rt".*?>(?:<a.*?>)?(.*?)(?:</a>)?</h3>', r.text):
+                                clean_title = re.sub(r'<[^>]+>', '', match.group(1))
+                                if "User profiles for author" not in clean_title and "[PDF]" not in clean_title:
+                                    titles.append(f"[Scholar Fallback] {clean_title}")
+                    except Exception as e:
+                        print(f"Scholar fallback failed for {author_query}: {e}")
+
+        result[profile_id] = titles
+        
+    return result
+
+
+@mcp.tool()
+@retry_on_429()
+def invite_reviewer(venue_id: str, forum_id: str, reviewer_id: str) -> str:
+    """
+    Invite a specific reviewer to review a given paper using the Invite_Assignment edge.
+    """
+    client = get_client()
+
+    try:
+        sub = client.get_note(forum_id)
+        number = sub.number
+        # Discover the correct Area Chair signature for this paper
+        sig, parent = _get_submission_contact_info(client, venue_id, number)
+    except Exception:
+        # Fallback if note fetching fails
+        sig = venue_id
+
+    invite_edge = Edge(
+        invitation=f"{venue_id}/Reviewers/-/Invite_Assignment",
+        head=forum_id,
+        tail=reviewer_id,
+        label="Invitation Sent",
+        weight=0,
+        signatures=[sig],
+        readers=[venue_id, reviewer_id, sig],
+        writers=[venue_id, sig]
+    )
+    
+    client.post_edge(invite_edge)
+    return f"Successfully sent invitation to {reviewer_id} for forum {forum_id}."
 
 
 if __name__ == "__main__":

@@ -1563,12 +1563,14 @@ def get_top_10_emergency_reviewers(venue_id: str, forum_id: str) -> Dict[str, Li
     affinity_edges = client.get_edges(
         invitation=f"{venue_id}/Reviewers/-/Affinity_Score",
         head=forum_id,
-        sort="weight:desc",
-        limit=100
+        limit=1000
     )
     
     if not affinity_edges:
         return {}
+        
+    affinity_edges.sort(key=lambda e: getattr(e, 'weight', 0) or 0, reverse=True)
+    affinity_edges = affinity_edges[:100]
 
     # 2. Fetch Reviewer Quotas
     max_papers_edges = client.get_all_edges(
@@ -1605,18 +1607,27 @@ def get_top_10_emergency_reviewers(venue_id: str, forum_id: str) -> Dict[str, Li
         profile_id = profile.id
         pubs = profile.content.get('publications', [])
         # Sort by creation date or publication date
-        pubs.sort(key=lambda x: x.get('cdate') or x.get('pdate') or 0, reverse=True)
+        pubs.sort(key=lambda x: getattr(x, 'cdate', 0) or getattr(x, 'pdate', 0) or 0, reverse=True)
         recent_pubs = pubs[:20]
         
         # Check if they have recent papers (from 2025 onwards)
         has_recent = False
         YEAR_2025_MS = 1735689600000
         for p in recent_pubs:
-            if (p.get('cdate') or 0) >= YEAR_2025_MS or (p.get('pdate') or 0) >= YEAR_2025_MS:
+            if getattr(p, 'cdate', 0) >= YEAR_2025_MS or getattr(p, 'pdate', 0) >= YEAR_2025_MS:
                 has_recent = True
                 break
                 
-        titles = [p.get('content', {}).get('title', 'Unknown Title') for p in recent_pubs]
+        def get_title(note):
+            content = getattr(note, 'content', {})
+            if isinstance(content, dict):
+                title_field = content.get('title')
+                if isinstance(title_field, dict):
+                    return title_field.get('value', 'Unknown Title')
+                return title_field or 'Unknown Title'
+            return 'Unknown Title'
+                
+        titles = [get_title(p) for p in recent_pubs]
         
         # Fallback to Google Scholar if no recent papers
         if not has_recent:

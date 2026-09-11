@@ -35,6 +35,11 @@ A powerful [Model Context Protocol](https://modelcontextprotocol.io/) server for
 - **Submission Search**: Keyword search across titles and abstracts.
 - **Server Time Check**: Synchronize local clocks and automated agents with OpenReview server time.
 
+### 📥 Paper & Attachment Downloads
+- **Download Submission Attachments**: Download author rebuttals, supplementary materials, or any attached files for a single paper via note ID or forum URL (`download_submission_attachments`).
+- **Batch Download Attachments**: Download attachments (e.g., all author rebuttals) across all assigned papers for Reviewers or ACs (`download_batch_attachments`).
+- **Batch Download PDFs**: Download full paper PDFs for assigned papers (`download_batch_pdfs`).
+
 ## 🛠️ Installation
 
 ```bash

@@ -33,3 +33,6 @@ A Model Context Protocol (MCP) server for interacting with OpenReview.net API v2
 - `get_bidding_info`: List papers available for bidding and current user bids.
 - `place_bid`: Submit or update a bid for a paper.
 - `get_bidding_status`: Summary of bidding progress in a venue.
+- `download_submission_attachments`: Download attached files (rebuttals, supplementary materials, etc.) for a specific submission by forum URL or ID.
+- `download_batch_attachments`: Batch download attachments (e.g., all rebuttals) across assigned papers.
+- `download_batch_pdfs`: Batch download PDFs for assigned papers.

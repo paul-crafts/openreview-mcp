@@ -33,14 +33,23 @@ The primary goal for an AC is to ensure reviews are submitted on time.
    - `get_bidding_info(venue_id, role='Area_Chairs')` to see papers and current bids.
    - `place_bid(venue_id, submission_id, bid, role='Area_Chairs')` to update interest.
 
+### Area Chair (AC) - "The Meta-Review Synthesizer"
+Need a structured, per-paper synthesis of your assigned batch's reviews (grouped
+strengths/weaknesses, disagreements, and a verbatim-quote-backed action-item list ranked
+Critical/Medium/Low)? Call the `ac_meta_review_workflow` prompt for the full guide and JSON
+schema — don't load it unless you're actually doing this. Tools involved:
+`dump_ac_batch_submissions` → (you identify reviews & synthesize) →
+`verify_quotes_in_batch` → `render_meta_review_report`.
+
 ### Reviewer - "The Feedback Provider"
 1. **Bidding**:
    - `get_bidding_info(venue_id)` to list papers for bidding.
    - `place_bid(venue_id, submission_id, bid)` to set your interest (e.g., 'Very High').
    - `get_bidding_status(venue_id)` for a summary.
 2. **Assignments**: `get_reviewer_assignments(venue_id)` to see what you need to work on.
-2. **Deadlines**: `get_venue_deadlines(venue_id)` to prioritize tasks.
-3. **Staying Current**: `get_discussion_updates(venue_id)` to check for new author rebuttals or AC comments in your forums.
+3. **Deadlines**: `get_venue_deadlines(venue_id)` to prioritize tasks.
+4. **Staying Current**: `get_discussion_updates(venue_id)` to check for new author rebuttals or AC comments in your forums.
+5. **Rebuttals & Attachments**: When reviewing author rebuttals or supplementary materials, use `download_submission_attachments(submission_id_or_url, attachment_type='rebuttal')` for a single paper (accepts forum URLs directly), or `download_batch_attachments(venue_id, role='Reviewers', attachment_type='rebuttal')` to batch download all rebuttals for your assigned papers.
 
 ### Author - "The Paper Owner"
 1. **Tracking**: `get_my_submissions(venue_id)` to see the status of your papers.

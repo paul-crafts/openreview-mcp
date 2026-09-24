@@ -13,6 +13,14 @@ from openreview import OpenReviewException
 import openreview.tools
 import urllib.parse
 
+from openreview_mcp.rate_limiter import (
+    RateLimitingAdapter,
+    OpenReviewIPBannedError,
+    load_cached_token,
+    save_cached_token,
+    clear_cached_token,
+)
+
 
 # --- Rate Limit Handling ---
 
@@ -26,6 +34,8 @@ def retry_on_429(max_retries: int = 5):
             for i in range(max_retries):
                 try:
                     return func(*args, **kwargs)
+                except OpenReviewIPBannedError:
+                    raise
                 except Exception as e:
                     # Check for OpenReviewException with 429 status
                     is_429 = False
@@ -71,24 +81,55 @@ _client_instance: Optional[OpenReviewClient] = None
 
 @retry_on_429()
 def get_client() -> OpenReviewClient:
-    """Get the cached OpenReview API v2 client or create a new one."""
+    """Get the cached OpenReview API v2 client or create a new one with rate limiting and token caching."""
     global _client_instance
 
     if _client_instance is not None:
         return _client_instance
 
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ImportError:
+        pass
+
     username = os.environ.get("OPENREVIEW_USERNAME")
     password = os.environ.get("OPENREVIEW_PASSWORD")
     baseurl = os.environ.get("OPENREVIEW_BASEURL", "https://api2.openreview.net")
 
+    # 1. Try initializing client from OPENREVIEW_TOKEN or cached token first
+    token = os.environ.get("OPENREVIEW_TOKEN") or load_cached_token(username, baseurl)
+    if token:
+        try:
+            client = OpenReviewClient(baseurl=baseurl, token=token)
+            adapter = RateLimitingAdapter()
+            client.session.mount("https://", adapter)
+            client.session.mount("http://", adapter)
+            # Lightweight verification
+            _ = client.profile.id
+            _client_instance = client
+            return _client_instance
+        except Exception:
+            clear_cached_token()
+
     if not username or not password:
         raise ValueError(
-            "OPENREVIEW_USERNAME and OPENREVIEW_PASSWORD environment variables must be set."
+            "OPENREVIEW_USERNAME and OPENREVIEW_PASSWORD environment variables (or valid cached token) must be set."
         )
 
-    _client_instance = OpenReviewClient(
+    # 2. Authenticate with username and password
+    client = OpenReviewClient(
         baseurl=baseurl, username=username, password=password
     )
+    adapter = RateLimitingAdapter()
+    client.session.mount("https://", adapter)
+    client.session.mount("http://", adapter)
+
+    if getattr(client, "token", None):
+        save_cached_token(username, baseurl, client.token)
+
+    _client_instance = client
     return _client_instance
 
 
@@ -176,6 +217,15 @@ def _get_assigned_submissions(
     return [client.get_note(sid) for sid in submission_ids]
 
 
+def _get_field(note: Any, field_name: str, default: Any = "") -> Any:
+    """Helper to extract field value handling both v1 and v2 Note representations."""
+    content = getattr(note, "content", {}) or {}
+    val = content.get(field_name, default)
+    if isinstance(val, dict):
+        return val.get("value", default)
+    return val if val is not None else default
+
+
 def _is_withdrawn(note) -> bool:
     """
     Whether a submission Note has been withdrawn. Also a stable, platform-wide
@@ -184,9 +234,7 @@ def _is_withdrawn(note) -> bool:
     venue-specific review-form conventions, which this codebase deliberately does not
     try to guess at in tool code (see dump_ac_batch_submissions).
     """
-    return "Withdrawn_Submission" in str(
-        note.content.get("venueid", {}).get("value", "")
-    )
+    return "Withdrawn_Submission" in str(_get_field(note, "venueid", ""))
 
 
 def _sanitize_filename_component(text: str, max_len: int = 50) -> str:
@@ -217,16 +265,23 @@ def get_ac_submissions(venue_id: str) -> List[Dict[str, Any]]:
 @mcp.tool()
 @retry_on_429()
 def get_bidding_info(
-    venue_id: str, role: str = "Reviewers", limit: int = 50, offset: int = 0
+    venue_id: str,
+    role: str = "Reviewers",
+    limit: int = 50,
+    offset: int = 0,
+    include_abstract: bool = True,
 ) -> Dict[str, Any]:
     """
     Get papers available for bidding and current bids for the user.
+    Automatically detects personalized candidate pools (Bid_Range) used by large conferences
+    (ICLR, NeurIPS) or falls back to direct venue submissions (CoLLAs, workshops).
 
     Args:
-        venue_id: The ID of the venue (e.g., 'collas.org/2026/Conference').
+        venue_id: The ID of the venue (e.g., 'collas.org/2026/Conference' or 'ICLR.cc/2027/Conference').
         role: The role (default: 'Reviewers', can be 'Area_Chairs').
         limit: Max papers to return (default 50).
         offset: Pagination offset (default 0).
+        include_abstract: Whether to include paper abstracts (default True).
     """
     client = get_client()
     my_id = client.profile.id
@@ -234,16 +289,14 @@ def get_bidding_info(
     inv_id = f"{venue_id}/{role}/-/Bid"
 
     # 1. Get bidding invitation for allowed labels
+    labels = []
     try:
         invitation = client.get_invitation(inv_id)
         # Extract labels from invitation (v2 structure)
-        labels = []
-        # Check invitation.edge
         edge_config = getattr(invitation, "edge", {})
         if edge_config and "label" in edge_config:
             labels = edge_config["label"].get("param", {}).get("enum", [])
 
-        # Check invitation.edit
         if not labels:
             edit_config = getattr(invitation, "edit", {})
             if edit_config and "label" in edit_config:
@@ -253,7 +306,6 @@ def get_bidding_info(
             # Fallback if structure is slightly different or it's v1-like
             content = getattr(invitation, "content", {})
             if "label" in content:
-                # Some v2 invitations store params in content
                 label_val = content["label"].get("value", {})
                 if isinstance(label_val, dict):
                     labels = label_val.get("param", {}).get("enum", [])
@@ -266,11 +318,90 @@ def get_bidding_info(
         return {"error": f"Bidding invitation {inv_id} not found or not open. {str(e)}"}
 
     # 2. Get current bids
-    current_bids = client.get_all_edges(invitation=inv_id, tail=my_id)
-    bid_map = {edge.head: edge.label for edge in current_bids}
+    try:
+        current_bids = client.get_all_edges(invitation=inv_id, tail=my_id)
+        bid_map = {edge.head: edge.label for edge in current_bids}
+    except Exception:
+        bid_map = {}
 
-    # 3. Get submissions
-    # Try common submission invitations in order of likelihood
+    # 3. Check for personalized candidate pool (Bid_Range) first
+    candidate_edges = []
+    try:
+        candidate_edges = client.get_all_edges(
+            invitation=f"{venue_id}/{role}/-/Bid_Range", tail=my_id
+        )
+        if not candidate_edges:
+            candidate_edges = client.get_all_edges(
+                invitation=f"{venue_id}/-/Bid_Range", tail=my_id
+            )
+    except Exception:
+        candidate_edges = []
+
+    if candidate_edges:
+        # Sort by affinity score descending (if weight present)
+        candidate_edges.sort(
+            key=lambda e: getattr(e, "weight", 0.0) or 0.0, reverse=True
+        )
+        total_pool_size = len(candidate_edges)
+        paged_edges = candidate_edges[offset : offset + limit]
+        paged_heads = [e.head for e in paged_edges]
+        affinity_map = {
+            e.head: e.weight
+            for e in paged_edges
+            if getattr(e, "weight", None) is not None
+        }
+
+        # Batch fetch notes
+        notes = []
+        if paged_heads:
+            try:
+                notes = client.get_notes_by_ids(paged_heads)
+            except Exception:
+                for hid in paged_heads:
+                    try:
+                        n = client.get_note(hid)
+                        if n:
+                            notes.append(n)
+                    except Exception:
+                        pass
+
+        notes_dict = {n.id: n for n in notes}
+        ordered_notes = [notes_dict[hid] for hid in paged_heads if hid in notes_dict]
+
+        papers = []
+        for s in ordered_notes:
+            paper_entry = {
+                "id": s.id,
+                "number": getattr(s, "number", None),
+                "title": _get_field(s, "title", "No Title"),
+                "current_bid": bid_map.get(s.id, "No Bid"),
+                "forum_url": f"https://openreview.net/forum?id={getattr(s, 'forum', None) or s.id}",
+            }
+            if s.id in affinity_map:
+                paper_entry["affinity_score"] = affinity_map[s.id]
+            if include_abstract:
+                paper_entry["abstract"] = _get_field(s, "abstract", "")
+            keywords = _get_field(s, "keywords", [])
+            if keywords:
+                paper_entry["keywords"] = keywords
+            primary_area = _get_field(s, "primary_area", "")
+            if primary_area:
+                paper_entry["primary_area"] = primary_area
+            if _is_withdrawn(s):
+                paper_entry["is_withdrawn"] = True
+            papers.append(paper_entry)
+
+        return {
+            "venue_id": venue_id,
+            "role": role,
+            "bidding_mode": "bid_range",
+            "total_pool_size": total_pool_size,
+            "allowed_bids": labels,
+            "papers": papers,
+            "total_papers_returned": len(papers),
+        }
+
+    # 4. Fallback to direct submission venue (e.g., CoLLAs, workshops)
     sub_inv_patterns = [
         f"{venue_id}/-/Submission",
         f"{venue_id}/-/Submission_Note",
@@ -297,18 +428,29 @@ def get_bidding_info(
 
     papers = []
     for s in submissions:
-        papers.append(
-            {
-                "id": s.id,
-                "number": s.number,
-                "title": s.content.get("title", {}).get("value", "No Title"),
-                "current_bid": bid_map.get(s.id, "No Bid"),
-            }
-        )
+        paper_entry = {
+            "id": s.id,
+            "number": getattr(s, "number", None),
+            "title": _get_field(s, "title", "No Title"),
+            "current_bid": bid_map.get(s.id, "No Bid"),
+            "forum_url": f"https://openreview.net/forum?id={getattr(s, 'forum', None) or s.id}",
+        }
+        if include_abstract:
+            paper_entry["abstract"] = _get_field(s, "abstract", "")
+        keywords = _get_field(s, "keywords", [])
+        if keywords:
+            paper_entry["keywords"] = keywords
+        primary_area = _get_field(s, "primary_area", "")
+        if primary_area:
+            paper_entry["primary_area"] = primary_area
+        if _is_withdrawn(s):
+            paper_entry["is_withdrawn"] = True
+        papers.append(paper_entry)
 
     return {
         "venue_id": venue_id,
         "role": role,
+        "bidding_mode": "direct_submissions",
         "allowed_bids": labels,
         "papers": papers,
         "total_papers_returned": len(papers),
@@ -341,26 +483,64 @@ def place_bid(
     venue_id: str, submission_id: str, bid: str, role: str = "Reviewers"
 ) -> Dict[str, Any]:
     """
-    Place or update a bid for a specific submission.
+    Place or update a bid for a specific submission. To remove/unbid a submission, pass 'No Bid' or 'none'.
 
     Args:
         venue_id: Venue ID.
         submission_id: Paper ID (Note ID).
-        bid: The bid label (e.g., 'Very High', 'Neutral').
+        bid: The bid label (e.g., 'Very High', 'Neutral', 'Unwilling', or 'No Bid' to unbid).
         role: Role (default: 'Reviewers').
     """
     client = get_client()
     my_id = client.profile.id
     inv_id = f"{venue_id}/{role}/-/Bid"
-    # Fetch invitation to get required readers/writers
+
+    # Handle unbidding / clearing bid
+    if not bid or str(bid).strip().lower() in ["no bid", "none", "", "clear", "unbid", "delete"]:
+        try:
+            client.delete_edges(invitation=inv_id, head=submission_id, tail=my_id)
+            return {
+                "status": "success",
+                "action": "unbid",
+                "bid": "No Bid",
+                "submission_id": submission_id,
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to remove bid: {str(e)}",
+                "submission_id": submission_id,
+            }
+
+    # Fetch invitation to get required readers/writers and validate label
     readers = None
     writers = None
+    allowed_labels = []
     try:
         invitation = client.get_invitation(inv_id)
         # Check invitation.edge or invitation.edit for v2
         edge_config = getattr(invitation, "edge", {})
         if not edge_config:
             edge_config = getattr(invitation, "edit", {})
+
+        # Extract allowed labels
+        if edge_config and "label" in edge_config:
+            allowed_labels = edge_config["label"].get("param", {}).get("enum", [])
+        if not allowed_labels:
+            content = getattr(invitation, "content", {})
+            if "label" in content:
+                label_val = content["label"].get("value", {})
+                if isinstance(label_val, dict):
+                    allowed_labels = label_val.get("param", {}).get("enum", [])
+
+        # Validate label if allowed_labels is defined
+        if allowed_labels and bid not in allowed_labels:
+            return {
+                "status": "error",
+                "message": f"Invalid bid label '{bid}'. Allowed labels for {inv_id} are: {allowed_labels}",
+                "allowed_bids": allowed_labels,
+                "submission_id": submission_id,
+            }
 
         def resolve_placeholders(val):
             # Extract list from potential dict structure in v2
@@ -425,13 +605,13 @@ def place_bid(
             "tip": "Check if the readers/writers above match what the venue requires. Ensure you are using the correct role (Reviewers vs Area_Chairs).",
         }
 
-    return {"status": "success", "bid": bid, "submission_id": submission_id}
+    return {"status": "success", "action": "bid", "bid": bid, "submission_id": submission_id}
 
 
 @mcp.tool()
 @retry_on_429()
 def get_bidding_status(venue_id: str, role: str = "Reviewers") -> Dict[str, Any]:
-    """Summary of current bids for the venue."""
+    """Summary of current bids and bidding pool for the venue."""
     client = get_client()
     my_id = client.profile.id
     inv_id = f"{venue_id}/{role}/-/Bid"
@@ -450,12 +630,33 @@ def get_bidding_status(venue_id: str, role: str = "Reviewers") -> Dict[str, Any]
         if label in ["Very High", "High"]:
             high_interest.append(b.head)
 
-    return {
+    result: Dict[str, Any] = {
         "venue_id": venue_id,
+        "role": role,
         "total_bids": len(bids),
         "summary": summary,
         "high_interest_paper_ids": high_interest,
     }
+
+    # Check if this venue has a candidate pool (Bid_Range)
+    candidate_edges = []
+    try:
+        candidate_edges = client.get_all_edges(
+            invitation=f"{venue_id}/{role}/-/Bid_Range", tail=my_id
+        )
+        if not candidate_edges:
+            candidate_edges = client.get_all_edges(
+                invitation=f"{venue_id}/-/Bid_Range", tail=my_id
+            )
+    except Exception:
+        candidate_edges = []
+
+    if candidate_edges:
+        pool_size = len(candidate_edges)
+        result["total_papers_in_pool"] = pool_size
+        result["total_unbid"] = pool_size - len(bids)
+
+    return result
 
 
 @mcp.tool()
@@ -816,7 +1017,7 @@ def export_venue_submissions(
     output_file: Optional[str] = None,
     output_format: str = "json",
     include_abstract: bool = True,
-    max_workers: int = 10,
+    max_workers: int = 3,
 ) -> Dict[str, Any]:
     """
     Export paper titles, abstracts, authors, links, and extracted reviewer scores for a venue or specific venue tab.
@@ -832,7 +1033,7 @@ def export_venue_submissions(
         output_file: Optional filepath to save the exported data (e.g., 'icml_spotlight_papers.json' or '.csv').
         output_format: Output format if saving to file: 'json', 'csv', or 'both' (default: 'json').
         include_abstract: Whether to include abstract text in output records (default: True).
-        max_workers: Concurrent thread pool size for review extraction (default: 10).
+        max_workers: Concurrent thread pool size for review extraction (default: 3).
     """
     client = get_client()
 

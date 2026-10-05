@@ -3214,7 +3214,7 @@ def get_top_10_emergency_reviewers(venue_id: str, forum_id: str) -> Dict[str, Li
         has_recent = False
         YEAR_2025_MS = 1735689600000
         for p in recent_pubs:
-            if getattr(p, 'cdate', 0) >= YEAR_2025_MS or getattr(p, 'pdate', 0) >= YEAR_2025_MS:
+            if (getattr(p, 'cdate', None) or 0) >= YEAR_2025_MS or (getattr(p, 'pdate', None) or 0) >= YEAR_2025_MS:
                 has_recent = True
                 break
                 
@@ -3281,6 +3281,14 @@ def invite_reviewer(venue_id: str, forum_id: str, reviewer_id: str) -> str:
         # Fallback if note fetching fails
         sig = venue_id
 
+    # OpenReview requires the paper-level AC/SAC groups (not the anonymous AC id)
+    # in readers/writers; the anonymous id is only used as the signature.
+    try:
+        paper_prefix = f"{venue_id}/Submission{number}"
+        paper_groups = [f"{paper_prefix}/Senior_Area_Chairs", f"{paper_prefix}/Area_Chairs"]
+    except NameError:
+        paper_groups = [sig]
+
     invite_edge = Edge(
         invitation=f"{venue_id}/Reviewers/-/Invite_Assignment",
         head=forum_id,
@@ -3288,8 +3296,8 @@ def invite_reviewer(venue_id: str, forum_id: str, reviewer_id: str) -> str:
         label="Invitation Sent",
         weight=0,
         signatures=[sig],
-        readers=[venue_id, reviewer_id, sig],
-        writers=[venue_id, sig]
+        readers=[venue_id, *paper_groups, reviewer_id],
+        writers=[venue_id, *paper_groups]
     )
     
     client.post_edge(invite_edge)

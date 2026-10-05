@@ -3179,13 +3179,20 @@ def get_top_10_emergency_reviewers(venue_id: str, forum_id: str) -> Dict[str, Li
     quota_map = {e.tail: int(e.weight) for e in max_papers_edges if e.weight is not None}
     DEFAULT_QUOTA = 5
     
+    # Reviewers with a conflict edge on this paper cannot be invited
+    conflict_edges = client.get_all_edges(
+        invitation=f"{venue_id}/Reviewers/-/Conflict",
+        head=forum_id
+    )
+    conflicted = {e.tail for e in conflict_edges}
+
     top_10_reviewers = []
-    candidate_ids = [e.tail for e in affinity_edges]
-    
+    candidate_ids = [e.tail for e in affinity_edges if e.tail not in conflicted]
+
     for candidate_id in candidate_ids:
         if len(top_10_reviewers) >= 10:
             break
-            
+
         assignments = client.get_edges(
             invitation=f"{venue_id}/Reviewers/-/Assignment",
             tail=candidate_id

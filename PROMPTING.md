@@ -29,7 +29,13 @@ The primary goal for an AC is to ensure reviews are submitted on time.
    - Summarize the candidates and their recent publications for the user to make a selection.
    - Once the user selects the best candidate, use `invite_reviewer(venue_id, forum_id, reviewer_id)` to officially send the invitation.
 
-2. **Bidding**:
+6. **Forum Messages (Official Comments)**:
+   - Use `get_forum_message_options(venue_id, submission_id_or_number)` to check allowed readers, anonymous reviewer groups, and AC signature for an assigned paper or the batch.
+   - Use `post_forum_message(venue_id, submission_id_or_number, comment, readers='reviewers', dry_run=True)` to preview and post a message to a paper's forum.
+   - Use `batch_post_forum_messages(venue_id, comment, submissions=None, dry_run=True)` to message all (or selected) papers in the AC batch using placeholders like `{number}`, `{title}`, `{paper_id}`, `{forum_url}`.
+   - **Safety First**: Always run with `dry_run=True` (default) first and request explicit verbal confirmation before setting `dry_run=False`.
+
+7. **Bidding**:
    - `get_bidding_info(venue_id, role='Area_Chairs')` to see papers and current bids.
    - `place_bid(venue_id, submission_id, bid, role='Area_Chairs')` to update interest.
 

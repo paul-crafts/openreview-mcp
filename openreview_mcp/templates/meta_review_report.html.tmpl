@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${venue_title} — Meta-Review Synthesis</title>
+<style>
+  :root{
+    --bg:#f6f6f4;
+    --panel:#ffffff;
+    --ink:#1c1e21;
+    --muted:#5b6069;
+    --line:#e4e3de;
+    --accent:#2457c5;
+    --strength:#1e7d47;
+    --strength-bg:#eaf6ee;
+    --strength-line:#bfe4cb;
+    --weak:#a3311f;
+    --weak-bg:#fbeeec;
+    --weak-line:#f0c9c1;
+    --conflict:#7a4b16;
+    --conflict-bg:#fbf1e0;
+    --conflict-line:#efd7a5;
+    --isolated:#3a4b8a;
+    --isolated-bg:#eef1fb;
+    --isolated-line:#cfd7f2;
+    --minor-bg:#f2f2ef;
+    --code:#eceae3;
+    --radius:10px;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);
+    color:var(--ink);
+    line-height:1.55;
+  }
+  a{color:var(--accent); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  .layout{display:flex; min-height:100vh;}
+  nav.sidebar{
+    width:260px;
+    flex:0 0 260px;
+    background:var(--panel);
+    border-right:1px solid var(--line);
+    padding:22px 16px 40px;
+    position:sticky;
+    top:0;
+    align-self:flex-start;
+    height:100vh;
+    overflow-y:auto;
+  }
+  .nav-title{
+    font-size:13px;
+    font-weight:700;
+    letter-spacing:.04em;
+    text-transform:uppercase;
+    color:var(--muted);
+    margin:0 0 4px;
+  }
+  .nav-sub{font-size:12px; color:var(--muted); margin:0 0 18px;}
+  nav.sidebar ul{list-style:none; margin:0; padding:0;}
+  nav.sidebar li{margin-bottom:2px;}
+  nav.sidebar a.navlink{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:8px;
+    padding:8px 10px;
+    border-radius:8px;
+    font-size:13.5px;
+    color:var(--ink);
+    line-height:1.3;
+  }
+  nav.sidebar a.navlink:hover{background:var(--bg); text-decoration:none;}
+  nav.sidebar a.navlink.active{background:#eaf0fd; color:var(--accent); font-weight:600;}
+  .nav-divider{border-top:1px solid var(--line); margin:14px 0;}
+  main{flex:1; padding:36px 48px 100px; max-width:900px;}
+  header.page-header{margin-bottom:30px;}
+  header.page-header h1{font-size:28px; margin:0 0 8px;}
+  .intro{color:var(--muted); font-size:14.5px; max-width:720px;}
+  .stat-strip{display:flex; gap:14px; flex-wrap:wrap; margin:20px 0 8px;}
+  .stat{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:12px 16px; min-width:120px;}
+  .stat .num{font-size:22px; font-weight:700; display:block;}
+  .stat .label{font-size:12px; color:var(--muted);}
+  .header-actions{display:flex; gap:10px; margin-top:14px; flex-wrap:wrap;}
+  section.submission{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:28px 30px 32px;
+    margin-bottom:32px;
+    scroll-margin-top:20px;
+  }
+  section.submission h2{font-size:20px; margin:0 0 10px; padding-bottom:12px; border-bottom:1px solid var(--line);}
+  .sub-id{
+    display:inline-block;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:12.5px;
+    color:var(--muted);
+    background:var(--code);
+    border-radius:6px;
+    padding:1px 7px;
+    margin-right:8px;
+    vertical-align:middle;
+  }
+  .reviewer-badges{margin:10px 0 22px; display:flex; gap:8px; flex-wrap:wrap;}
+  .rbadge{
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:12px;
+    background:var(--bg);
+    border:1px solid var(--line);
+    border-radius:20px;
+    padding:3px 10px;
+    color:var(--ink);
+  }
+  .rbadge b{font-weight:700;}
+  h3.section-heading{
+    font-size:14px;
+    text-transform:uppercase;
+    letter-spacing:.04em;
+    margin:26px 0 12px;
+    display:flex;
+    align-items:center;
+    gap:8px;
+  }
+  h3.section-heading::before{content:""; width:9px; height:9px; border-radius:50%; display:inline-block;}
+  h3.h-strengths{color:var(--strength);}
+  h3.h-strengths::before{background:var(--strength);}
+  h3.h-weaknesses{color:var(--weak);}
+  h3.h-weaknesses::before{background:var(--weak);}
+  h3.h-conflicts{color:var(--conflict);}
+  h3.h-conflicts::before{background:var(--conflict);}
+  h3.h-isolated{color:var(--isolated);}
+  h3.h-isolated::before{background:var(--isolated);}
+  h3.h-actions{color:#8a1c1c;}
+  h3.h-actions::before{background:#8a1c1c;}
+  .point{border-radius:10px; padding:14px 16px; margin-bottom:12px; border:1px solid transparent;}
+  .point.strength{background:var(--strength-bg); border-color:var(--strength-line);}
+  .point.weak{background:var(--weak-bg); border-color:var(--weak-line);}
+  .point.conflict{background:var(--conflict-bg); border-color:var(--conflict-line);}
+  .point-claim{margin:0 0 8px; font-size:15px; font-weight:600;}
+  .point-who{font-weight:400; color:var(--muted); font-size:13px;}
+  .point-note{font-size:12.5px; color:var(--muted); font-style:italic; margin:0 0 8px;}
+  ul.quotes{list-style:none; margin:0; padding:0;}
+  ul.quotes li{margin:0 0 7px; font-size:14px; padding-left:2px;}
+  .rid{
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:11.5px;
+    font-weight:700;
+    background:#fff;
+    border:1px solid var(--line);
+    border-radius:5px;
+    padding:1px 6px;
+    margin-right:6px;
+    white-space:nowrap;
+  }
+  .rid.pos{background:#e4f5e9; border-color:var(--strength-line); color:var(--strength);}
+  .rid.neg{background:#fbeae7; border-color:var(--weak-line); color:var(--weak);}
+  .minor-block{background:var(--minor-bg); border-radius:10px; padding:12px 16px; margin-top:6px;}
+  .minor-block .minor-label{font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); font-weight:700; margin:0 0 8px;}
+  .isolated-group{margin-bottom:16px;}
+  .isolated-group h5{
+    margin:0 0 8px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:13px;
+    display:inline-block;
+    background:var(--isolated-bg);
+    border:1px solid var(--isolated-line);
+    color:var(--isolated);
+    border-radius:6px;
+    padding:2px 9px;
+  }
+  .isolated-group ul{margin:8px 0 0; padding-left:20px;}
+  .isolated-group li{margin-bottom:8px; font-size:14px;}
+  .no-conflict-note{font-size:13.5px; color:var(--muted); font-style:italic; background:var(--minor-bg); padding:10px 14px; border-radius:8px;}
+  .action-tier{border-radius:12px; padding:16px 18px 6px; margin-bottom:14px; border:1px solid;}
+  .action-tier.tier-critical{background:#fef2f2; border-color:#f3b4b4;}
+  .action-tier.tier-medium{background:#fffbeb; border-color:#f3d888;}
+  .action-tier.tier-low{background:#f1f5f9; border-color:#cbd5e1;}
+  .tier-label{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    font-size:12px;
+    font-weight:800;
+    letter-spacing:.04em;
+    text-transform:uppercase;
+    padding:3px 11px;
+    border-radius:20px;
+    margin-bottom:12px;
+    color:#fff;
+  }
+  .tier-critical .tier-label{background:#b91c1c;}
+  .tier-medium .tier-label{background:#b45309;}
+  .tier-low .tier-label{background:#475569;}
+  ol.action-list{margin:0; padding-left:22px;}
+  ol.action-list li{margin-bottom:14px;}
+  .action-text{margin:0 0 4px; font-size:14.5px; line-height:1.5;}
+  .action-refs{margin:0 0 4px; font-size:12px;}
+  .action-refs .rid{background:#fff;}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:var(--code); padding:1px 5px; border-radius:5px; font-size:.92em;}
+  .md-actions{display:flex; gap:8px; margin:10px 0 4px; flex-wrap:wrap;}
+  .md-btn{
+    font-size:12px;
+    font-family:inherit;
+    background:#fff;
+    border:1px solid var(--line);
+    border-radius:20px;
+    padding:5px 12px;
+    cursor:pointer;
+    color:var(--ink);
+    transition:background .15s, color .15s, border-color .15s;
+  }
+  .md-btn:hover{background:var(--bg);}
+  .md-btn.copied{background:var(--strength-bg); border-color:var(--strength-line); color:var(--strength);}
+  .md-btn.copy-failed{background:var(--weak-bg); border-color:var(--weak-line); color:var(--weak);}
+  pre.md-raw{
+    background:#0f172a;
+    color:#e2e8f0;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:12.5px;
+    line-height:1.6;
+    padding:16px 18px;
+    border-radius:10px;
+    overflow-x:auto;
+    white-space:pre-wrap;
+    word-break:break-word;
+    margin:6px 0 18px;
+    max-height:520px;
+    overflow-y:auto;
+  }
+  section#verification-log{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:28px 30px 32px; scroll-margin-top:20px;}
+  section#verification-log h2{font-size:20px; margin:0 0 10px;}
+  details.vlog{border:1px solid var(--line); border-radius:10px; padding:10px 14px; margin-bottom:8px; background:var(--bg);}
+  details.vlog summary{cursor:pointer; font-weight:600; font-size:14px; display:flex; justify-content:space-between; align-items:center;}
+  details.vlog summary .pass{
+    color:var(--strength);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:12px;
+    background:var(--strength-bg);
+    border:1px solid var(--strength-line);
+    padding:1px 8px;
+    border-radius:20px;
+  }
+  details.vlog summary .fail{
+    color:var(--weak);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:12px;
+    background:var(--weak-bg);
+    border:1px solid var(--weak-line);
+    padding:1px 8px;
+    border-radius:20px;
+  }
+  details.vlog p{font-size:13.5px; color:var(--muted); margin:10px 0 0;}
+  .vlog-total{margin-top:14px; font-weight:700; font-size:14.5px; color:var(--strength);}
+  footer.page-footer{margin-top:36px; font-size:12.5px; color:var(--muted); text-align:center;}
+  @media (max-width: 860px){
+    nav.sidebar{display:none;}
+    main{padding:24px 18px 80px; max-width:100%;}
+  }
+  @media print{
+    nav.sidebar{display:none;}
+    main{padding:0 10px;}
+    section.submission{break-inside:avoid; border:none; box-shadow:none;}
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+  <nav class="sidebar" id="sidebar">
+    <p class="nav-title">${venue_title}</p>
+    <p class="nav-sub">Meta-review synthesis</p>
+    <ul>
+${sidebar_nav_html}
+    </ul>
+    <div class="nav-divider"></div>
+    <a class="nav-footer-link" href="#verification-log" data-target="verification-log">✓ Verification log</a>
+  </nav>
+
+  <main>
+    <header class="page-header">
+      <h1>Meta-Review Synthesis</h1>
+      <p class="intro">${venue_title} — generated ${generated_at}. Every strength, weakness, disagreement, isolated point, and action item below is grouped from the reviewers' own words; each bullet carries a verbatim quote attributed to its reviewer, verified against the raw dump with <code>verify_quotes_in_batch</code> before this report was rendered.</p>
+      <div class="header-actions">
+        <button class="md-btn" data-mdkey="full" data-action="copy">📋 Copy full report as Markdown</button>
+        <button class="md-btn" data-mdkey="full" data-action="download">⬇ Download .md</button>
+      </div>
+    </header>
+
+${papers_html}
+
+${excluded_withdrawn_html}
+
+    <section id="verification-log">
+      <h2>Verification Log</h2>
+${verification_log_html}
+    </section>
+
+    <footer class="page-footer">
+      Rendered by openreview-mcp's render_meta_review_report from a synthesis produced per the ac_meta_review_workflow prompt.
+    </footer>
+  </main>
+</div>
+
+<script type="text/plain" id="md-source">${raw_markdown_escaped}</script>
+
+<script>
+  const sections = document.querySelectorAll('section.submission, section#verification-log');
+  const links = document.querySelectorAll('.navlink, .nav-footer-link');
+
+  function setActive(id){
+    links.forEach(l => l.classList.toggle('active', l.dataset.target === id));
+  }
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if(entry.isIntersecting){
+        setActive(entry.target.id);
+      }
+    });
+  }, { rootMargin: '-10% 0px -75% 0px', threshold: 0 });
+
+  sections.forEach(sec => observer.observe(sec));
+
+  const rawMarkdown = document.getElementById('md-source').textContent;
+  const mdSections = { full: rawMarkdown };
+  rawMarkdown.split(/\n(?=## )/).forEach(part => {
+    const subMatch = part.match(/^## Paper (\S+)/);
+    if (subMatch) { mdSections[subMatch[1]] = part.trim(); return; }
+    if (/^## Verification Log/.test(part)) { mdSections['verification-log'] = part.trim(); return; }
+    mdSections.preamble = (mdSections.preamble || '') + part;
+  });
+
+  function fallbackCopy(text, done){
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    done(ok);
+  }
+
+  function copyText(text, btn){
+    const original = btn.textContent;
+    function done(ok){
+      btn.textContent = ok ? 'Copied ✓' : 'Press ⌘/Ctrl+C';
+      btn.classList.add(ok ? 'copied' : 'copy-failed');
+      setTimeout(() => {
+        btn.textContent = original;
+        btn.classList.remove('copied', 'copy-failed');
+      }, 1600);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => done(true)).catch(() => fallbackCopy(text, done));
+    } else {
+      fallbackCopy(text, done);
+    }
+  }
+
+  function downloadMarkdown(text, filename){
+    const blob = new Blob([text], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  document.querySelectorAll('.md-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.mdkey;
+      const text = mdSections[key] || '';
+      const action = btn.dataset.action;
+      if (action === 'copy') {
+        copyText(text, btn);
+      } else if (action === 'download') {
+        downloadMarkdown(text, 'meta_review_report.md');
+      } else if (action === 'view') {
+        const pre = document.getElementById('md-raw-' + key);
+        if (!pre) return;
+        if (pre.hidden) {
+          pre.textContent = text;
+          pre.hidden = false;
+          btn.textContent = '🙈 Hide Markdown';
+        } else {
+          pre.hidden = true;
+          btn.textContent = '👁 View Markdown';
+        }
+      }
+    });
+  });
+</script>
+</body>
+</html>

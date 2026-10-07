@@ -8,7 +8,7 @@ import datetime
 from functools import wraps
 from typing import Optional, List, Dict, Any
 from mcp.server.fastmcp import FastMCP
-from openreview.api import OpenReviewClient, Edge
+from openreview.api import OpenReviewClient, Edge, Note
 from openreview import OpenReviewException
 import openreview.tools
 import urllib.parse
@@ -3309,6 +3309,936 @@ def invite_reviewer(venue_id: str, forum_id: str, reviewer_id: str) -> str:
     
     client.post_edge(invite_edge)
     return f"Successfully sent invitation to {reviewer_id} for forum {forum_id}."
+
+
+def _resolve_submission(client: Any, venue_id: str, submission_id_or_number: Any) -> Any:
+    """Helper to resolve a submission note from paper number, note ID, or OpenReview URL."""
+    if hasattr(submission_id_or_number, "id") and hasattr(submission_id_or_number, "number"):
+        return submission_id_or_number
+
+    target_str = str(submission_id_or_number).strip()
+    if not target_str:
+        raise ValueError("submission_id_or_number cannot be empty.")
+
+    # 1. If numeric, check assigned submissions first
+    if target_str.isdigit():
+        target_num = int(target_str)
+        try:
+            assigned = _get_assigned_submissions(client, venue_id, "Area_Chairs")
+            for s in assigned:
+                if s.number == target_num:
+                    return s
+        except Exception:
+            pass
+
+        # Fallback query
+        try:
+            notes = client.get_notes(content={"venueid": venue_id}, number=target_num)
+            if notes:
+                return notes[0]
+        except Exception:
+            pass
+        raise ValueError(f"Could not find submission number {target_num} in venue '{venue_id}'.")
+
+    # 2. If it's a URL or note ID
+    target_id = _parse_submission_id(target_str)
+    try:
+        note = client.get_note(target_id)
+        if note:
+            return note
+    except Exception:
+        pass
+
+    try:
+        assigned = _get_assigned_submissions(client, venue_id, "Area_Chairs")
+        for s in assigned:
+            if s.id == target_id or s.id == target_str:
+                return s
+    except Exception:
+        pass
+
+    raise ValueError(f"Could not find submission '{submission_id_or_number}' in venue '{venue_id}'.")
+
+
+@mcp.tool()
+@retry_on_429()
+def get_initial_check_status(
+    venue_id: str, submission_id_or_number: Optional[Any] = None
+) -> Dict[str, Any]:
+    """
+    Get the initial check status and form options for AC-assigned submissions.
+
+    Area Chairs at conferences like ICLR are required to complete an 'Initial Check'
+    for each assigned paper (e.g. checking formatting, anonymity, scope, and flagging
+    for potential desk-rejection).
+
+    Args:
+        venue_id: The venue ID (e.g. 'ICLR.cc/2027/Conference').
+        submission_id_or_number: Optional paper number (e.g. 5963 or '5963'), note ID, or URL.
+                                  If omitted, checks all submissions assigned to the current AC.
+
+    Returns:
+        Dict containing venue info, counts, deadline/due date, allowed flags schema,
+        and per-submission status details.
+    """
+    client = get_client()
+    assigned = _get_assigned_submissions(client, venue_id, "Area_Chairs")
+
+    if submission_id_or_number is not None:
+        target_str = str(submission_id_or_number).strip()
+        filtered = []
+        if target_str.isdigit():
+            filtered = [s for s in assigned if s.number == int(target_str)]
+        else:
+            tid = _parse_submission_id(target_str)
+            filtered = [s for s in assigned if s.id == tid or s.id == target_str]
+
+        if not filtered:
+            sub = _resolve_submission(client, venue_id, submission_id_or_number)
+            assigned = [sub]
+        else:
+            assigned = filtered
+
+    if not assigned:
+        return {
+            "venue_id": venue_id,
+            "total_submissions": 0,
+            "submitted_count": 0,
+            "pending_count": 0,
+            "due_date": None,
+            "allowed_flags": [],
+            "submissions": [],
+        }
+
+    # Discover invitation and allowed options from the first submission
+    first_sub = assigned[0]
+    inv_id = f"{venue_id}/Submission{first_sub.number}/-/Initial_Check"
+    due_date_str = None
+    allowed_flags = []
+    try:
+        inv = client.get_invitation(inv_id)
+        duedate = getattr(inv, "duedate", None)
+        if duedate:
+            try:
+                dt = datetime.datetime.fromtimestamp(duedate / 1000, tz=datetime.timezone.utc)
+                due_date_str = dt.isoformat()
+            except Exception:
+                due_date_str = str(duedate)
+
+        items = (
+            inv.edit.get("note", {})
+            .get("content", {})
+            .get("flag_for_desk_rejection", {})
+            .get("value", {})
+            .get("param", {})
+            .get("items", [])
+        )
+        allowed_flags = [
+            {"value": item["value"], "description": item.get("description", "")}
+            for item in items
+            if "value" in item
+        ]
+    except Exception:
+        pass
+
+    if not allowed_flags:
+        allowed_flags = [
+            {"value": "no_issue", "description": "No desk-rejection issue."},
+            {"value": "out_of_scope", "description": "Yes. The paper is out of scope for ICLR."},
+            {"value": "improperly_formatted", "description": "Yes. The paper is improperly formatted (uses the wrong template, exceeds the 9-page limit, or is missing the required AI use statement)."},
+            {"value": "not_anonymous", "description": "Yes. The paper is not anonymous (it includes information about the authors' identity or institution)."},
+            {"value": "incomprehensible_main_claims", "description": "Yes. The paper's main claims are incomprehensible."},
+            {"value": "clearly_below_bar", "description": "Yes. Even assuming all the paper's main claims are true, it is clearly below the bar for ICLR (e.g. multiple reviewers are likely to give it a clear rejection)."},
+            {"value": "other", "description": "Yes. Other (Please explain)."},
+        ]
+
+    results = []
+    submitted_count = 0
+    pending_count = 0
+
+    for s in assigned:
+        sub_inv_id = f"{venue_id}/Submission{s.number}/-/Initial_Check"
+        notes = []
+        try:
+            notes = client.get_notes(invitation=sub_inv_id)
+        except Exception:
+            pass
+
+        title = _get_field(s, "title", "No Title")
+        if notes:
+            note = notes[0]
+            submitted_count += 1
+            submitted_at_str = None
+            cdate = getattr(note, "cdate", None) or getattr(note, "tcdate", None)
+            if cdate:
+                try:
+                    dt = datetime.datetime.fromtimestamp(cdate / 1000, tz=datetime.timezone.utc)
+                    submitted_at_str = dt.isoformat()
+                except Exception:
+                    submitted_at_str = str(cdate)
+
+            results.append({
+                "paper_number": s.number,
+                "submission_id": s.id,
+                "title": title,
+                "status": "submitted",
+                "flag_for_desk_rejection": _get_field(note, "flag_for_desk_rejection", []),
+                "additional_details": _get_field(note, "additional_details", ""),
+                "submitted_at": submitted_at_str,
+                "note_id": note.id,
+            })
+        else:
+            pending_count += 1
+            results.append({
+                "paper_number": s.number,
+                "submission_id": s.id,
+                "title": title,
+                "status": "pending",
+                "flag_for_desk_rejection": None,
+                "additional_details": None,
+                "submitted_at": None,
+                "note_id": None,
+            })
+
+    return {
+        "venue_id": venue_id,
+        "total_submissions": len(assigned),
+        "submitted_count": submitted_count,
+        "pending_count": pending_count,
+        "due_date": due_date_str,
+        "allowed_flags": allowed_flags,
+        "submissions": results,
+    }
+
+
+@mcp.tool()
+@retry_on_429()
+def submit_initial_check(
+    venue_id: str,
+    submission_id_or_number: Any,
+    flag_for_desk_rejection: List[str],
+    additional_details: str = "",
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """
+    Fill and submit the Initial Check form for an AC-assigned paper.
+
+    Args:
+        venue_id: Venue ID (e.g. 'ICLR.cc/2027/Conference').
+        submission_id_or_number: Paper number (e.g. 5963), note ID, or OpenReview URL.
+        flag_for_desk_rejection: List of check flags. Allowed values:
+            - 'no_issue': No desk-rejection issue.
+            - 'out_of_scope': Yes. The paper is out of scope for ICLR.
+            - 'improperly_formatted': Yes. The paper is improperly formatted.
+            - 'not_anonymous': Yes. The paper is not anonymous.
+            - 'incomprehensible_main_claims': Yes. The paper's main claims are incomprehensible.
+            - 'clearly_below_bar': Yes. Even assuming claims are true, clearly below the bar.
+            - 'other': Yes. Other (Please explain in additional_details).
+        additional_details: Optional commentary explaining the recommendation. Required if 'other' is selected.
+        dry_run: If True, previews the submission payload without posting to OpenReview. Defaults to False.
+
+    Returns:
+        Dict with status, action ('created' or 'updated'), submission details, and note ID.
+    """
+    client = get_client()
+
+    # Validate flag_for_desk_rejection early
+    if not isinstance(flag_for_desk_rejection, list) or not flag_for_desk_rejection:
+        raise ValueError("`flag_for_desk_rejection` must be a non-empty list of flag strings.")
+
+    if "no_issue" in flag_for_desk_rejection and len(flag_for_desk_rejection) > 1:
+        raise ValueError("`no_issue` cannot be combined with other desk rejection flags.")
+
+    target_sub = _resolve_submission(client, venue_id, submission_id_or_number)
+    sub_num = target_sub.number
+    sub_id = target_sub.id
+    inv_id = f"{venue_id}/Submission{sub_num}/-/Initial_Check"
+
+    # Fetch invitation to validate allowed values
+    invitation = client.get_invitation(inv_id)
+
+    items = (
+        invitation.edit.get("note", {})
+        .get("content", {})
+        .get("flag_for_desk_rejection", {})
+        .get("value", {})
+        .get("param", {})
+        .get("items", [])
+    )
+    allowed_flags = [item["value"] for item in items if "value" in item]
+    if not allowed_flags:
+        allowed_flags = [
+            "no_issue",
+            "out_of_scope",
+            "improperly_formatted",
+            "not_anonymous",
+            "incomprehensible_main_claims",
+            "clearly_below_bar",
+            "other",
+        ]
+
+    for f in flag_for_desk_rejection:
+        if f not in allowed_flags:
+            raise ValueError(f"Invalid flag '{f}'. Allowed flags are: {allowed_flags}")
+
+    if "other" in flag_for_desk_rejection and not (additional_details and additional_details.strip()):
+        raise ValueError("When selecting 'other', `additional_details` must be provided explaining the reason.")
+
+    # Discover AC signature
+    sig, _ = _get_submission_contact_info(client, venue_id, sub_num)
+    if sig == client.profile.id or "Area_Chair" not in sig:
+        groups = client.get_groups(
+            member=client.profile.id,
+            prefix=f"{venue_id}/Submission{sub_num}/Area_Chair"
+        )
+        for g in groups:
+            if re.search(r"Area_Chair.*", g.id) and not g.id.endswith("/Area_Chairs"):
+                sig = g.id
+                break
+
+    # Existing note check
+    existing_notes = client.get_notes(invitation=inv_id)
+    existing_note_id = existing_notes[0].id if existing_notes else None
+
+    note_content = {
+        "flag_for_desk_rejection": {"value": flag_for_desk_rejection}
+    }
+    if additional_details or existing_note_id:
+        note_content["additional_details"] = {
+            "value": additional_details.strip() if additional_details else ""
+        }
+
+    note_kwargs = {
+        "forum": target_sub.forum or sub_id,
+        "replyto": sub_id,
+        "signatures": [sig],
+        "readers": invitation.edit.get("note", {}).get("readers") or [
+            f"{venue_id}/Program_Chairs",
+            f"{venue_id}/Submission{sub_num}/Senior_Area_Chairs",
+            f"{venue_id}/Submission{sub_num}/Area_Chairs",
+        ],
+        "writers": [venue_id, sig],
+        "content": note_content,
+    }
+    if existing_note_id:
+        note_kwargs["id"] = existing_note_id
+
+    title = _get_field(target_sub, "title", "No Title")
+
+    if dry_run:
+        return {
+            "status": "preview",
+            "paper_number": sub_num,
+            "submission_id": sub_id,
+            "title": title,
+            "invitation": inv_id,
+            "signature": sig,
+            "flag_for_desk_rejection": flag_for_desk_rejection,
+            "additional_details": additional_details,
+            "is_update": bool(existing_note_id),
+            "existing_note_id": existing_note_id,
+            "message": "Dry run successful. The initial check form was validated but NOT submitted.",
+        }
+
+    note_obj = Note(**note_kwargs)
+    edit_response = client.post_note_edit(
+        invitation=inv_id,
+        signatures=[sig],
+        note=note_obj,
+    )
+    note_res = edit_response.get("note", {})
+    return {
+        "status": "success",
+        "action": "updated" if existing_note_id else "created",
+        "paper_number": sub_num,
+        "submission_id": sub_id,
+        "title": title,
+        "note_id": note_res.get("id") or edit_response.get("id"),
+        "invitation": inv_id,
+        "flag_for_desk_rejection": flag_for_desk_rejection,
+        "additional_details": additional_details,
+    }
+
+
+@mcp.tool()
+@retry_on_429()
+def batch_submit_initial_checks(
+    venue_id: str,
+    checks: List[Dict[str, Any]],
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """
+    Submit initial checks for multiple assigned papers in batch.
+
+    Each item in `checks` must contain:
+        - 'submission_id_or_number': paper number (int or str) or submission ID
+        - 'flag_for_desk_rejection': list of flags, e.g. ['no_issue']
+        - 'additional_details' (optional): text explaining the recommendation
+
+    Args:
+        venue_id: Venue ID (e.g. 'ICLR.cc/2027/Conference').
+        checks: List of check dicts to submit.
+        dry_run: If True, validates and previews all checks without submitting. Defaults to False.
+    """
+    results = []
+    errors = []
+
+    for i, item in enumerate(checks):
+        sub_ref = item.get("submission_id_or_number")
+        flags = item.get("flag_for_desk_rejection", [])
+        details = item.get("additional_details", "")
+
+        try:
+            res = submit_initial_check(
+                venue_id=venue_id,
+                submission_id_or_number=sub_ref,
+                flag_for_desk_rejection=flags,
+                additional_details=details,
+                dry_run=dry_run,
+            )
+            results.append(res)
+        except Exception as e:
+            errors.append({
+                "submission_id_or_number": sub_ref,
+                "error": str(e),
+            })
+
+        # Pace requests to be extra cautious with rate limits
+        if not dry_run and i < len(checks) - 1:
+            time.sleep(1.0)
+
+    return {
+        "status": "success" if not errors else ("partial_success" if results else "error"),
+        "total": len(checks),
+        "succeeded_count": len(results),
+        "failed_count": len(errors),
+        "dry_run": dry_run,
+        "results": results,
+        "errors": errors,
+    }
+
+
+def _format_template(text: Optional[str], **kwargs) -> Optional[str]:
+    """Format placeholders like {number}, {title} without failing on LaTeX or other braces."""
+    if not text:
+        return text
+    result = text
+    for k, v in kwargs.items():
+        result = result.replace(f"{{{k}}}", str(v))
+    return result
+
+
+def _discover_ac_signature(client: Any, venue_id: str, submission_number: int) -> str:
+    """Discover the paper-specific anonymized AC signature for a submission."""
+    sig, _ = _get_submission_contact_info(
+        client, venue_id, submission_number, role="Area_Chair"
+    )
+    if sig == client.profile.id or "Area_Chair" not in sig:
+        groups = client.get_groups(
+            member=client.profile.id,
+            prefix=f"{venue_id}/Submission{submission_number}/Area_Chair",
+        )
+        for g in groups:
+            if re.search(r"Area_Chair.*", g.id) and not g.id.endswith("/Area_Chairs"):
+                return g.id
+    return sig
+
+
+def _get_comment_invitation(client: Any, venue_id: str, submission_number: int) -> Any:
+    """Find the comment/official comment invitation for a submission."""
+    candidates = [
+        f"{venue_id}/Submission{submission_number}/-/Official_Comment",
+        f"{venue_id}/Submission{submission_number}/-/Comment",
+    ]
+    for inv_id in candidates:
+        try:
+            inv = client.get_invitation(inv_id)
+            if inv:
+                return inv
+        except Exception:
+            continue
+
+    # Fallback search
+    try:
+        invs = client.get_invitations(
+            prefix=f"{venue_id}/Submission{submission_number}/-/"
+        )
+        for inv in invs:
+            if "comment" in inv.id.lower():
+                return inv
+    except Exception:
+        pass
+
+    raise ValueError(
+        f"Could not find comment invitation for submission {submission_number} in venue '{venue_id}'."
+    )
+
+
+def _resolve_forum_readers(
+    client: Any,
+    venue_id: str,
+    submission_number: int,
+    readers: Optional[Any],
+    invitation: Any,
+) -> List[str]:
+    """
+    Resolve and validate readers for a forum comment Note.
+    Guarantees that all mandatory readers from the invitation schema are included.
+    Supports shortcuts: 'reviewers' / 'all_reviewers' / None, 'sac_only', 'authors'.
+    Supports explicit group list or reviewer IDs.
+    """
+    sub_prefix = f"{venue_id}/Submission{submission_number}"
+
+    # Extract mandatory reader definitions from invitation
+    items = (
+        invitation.edit.get("note", {})
+        .get("readers", {})
+        .get("param", {})
+        .get("items", [])
+    )
+    mandatory = [
+        item["value"]
+        for item in items
+        if item.get("optional") is False and "value" in item
+    ]
+    if not mandatory:
+        mandatory = [
+            f"{venue_id}/Program_Chairs",
+            f"{sub_prefix}/Senior_Area_Chairs",
+        ]
+
+    # Normalize readers input
+    if (
+        readers is None
+        or readers == ""
+        or readers == "all"
+        or readers == "reviewers"
+        or readers == "all_reviewers"
+    ):
+        resolved = list(mandatory)
+        for opt in [f"{sub_prefix}/Area_Chairs", f"{sub_prefix}/Reviewers"]:
+            if opt not in resolved:
+                resolved.append(opt)
+        return resolved
+
+    if isinstance(readers, str):
+        r_str = readers.strip().lower()
+        if r_str in ["sac_only", "private", "mandatory"]:
+            resolved = list(mandatory)
+            if f"{sub_prefix}/Area_Chairs" not in resolved:
+                resolved.append(f"{sub_prefix}/Area_Chairs")
+            return resolved
+        elif r_str in ["authors", "author", "public"]:
+            resolved = list(mandatory)
+            for opt in [
+                f"{sub_prefix}/Area_Chairs",
+                f"{sub_prefix}/Reviewers",
+                f"{sub_prefix}/Authors",
+            ]:
+                if opt not in resolved:
+                    resolved.append(opt)
+            return resolved
+        else:
+            readers = [readers]
+
+    resolved = list(mandatory)
+    for r in readers:
+        r = str(r).strip()
+        if not r:
+            continue
+        if not r.startswith(venue_id) and "/" not in r:
+            expanded = f"{sub_prefix}/{r}"
+        elif r.startswith("Submission"):
+            expanded = f"{venue_id}/{r}"
+        else:
+            expanded = r
+
+        if expanded not in resolved:
+            resolved.append(expanded)
+
+    if f"{sub_prefix}/Area_Chairs" not in resolved:
+        resolved.append(f"{sub_prefix}/Area_Chairs")
+
+    return resolved
+
+
+@mcp.tool()
+@retry_on_429()
+def get_forum_message_options(
+    venue_id: str,
+    submission_id_or_number: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """
+    Get forum messaging (Official Comment) options, reader groups, and AC signature for an assigned paper or the AC batch.
+
+    Args:
+        venue_id: Venue ID (e.g. 'ICLR.cc/2027/Conference').
+        submission_id_or_number: Optional paper number (e.g. 5963), note ID, or URL.
+            If omitted, provides a summary of the AC batch and sample configuration.
+
+    Returns:
+        Dict with invitation ID, status, mandatory readers, optional readers, reviewer groups,
+        AC signature, character limits, and allowed reader shortcuts.
+    """
+    client = get_client()
+
+    if submission_id_or_number is not None:
+        target_sub = _resolve_submission(client, venue_id, submission_id_or_number)
+        sub_num = target_sub.number
+        sub_id = target_sub.id
+        title = _get_field(target_sub, "title", "No Title")
+
+        inv = _get_comment_invitation(client, venue_id, sub_num)
+        items = (
+            inv.edit.get("note", {})
+            .get("readers", {})
+            .get("param", {})
+            .get("items", [])
+        )
+        mandatory = [
+            i["value"]
+            for i in items
+            if i.get("optional") is False and "value" in i
+        ]
+        optional = [
+            i["value"]
+            for i in items
+            if i.get("optional") is True and "value" in i
+        ]
+        in_group = [i["inGroup"] for i in items if "inGroup" in i]
+
+        rev_groups = [
+            g.id
+            for g in client.get_groups(
+                prefix=f"{venue_id}/Submission{sub_num}/Reviewer_"
+            )
+        ]
+        sig = _discover_ac_signature(client, venue_id, sub_num)
+
+        now_ms = time.time() * 1000
+        is_open = True
+        if inv.cdate and now_ms < inv.cdate:
+            is_open = False
+        if inv.expdate and now_ms > inv.expdate:
+            is_open = False
+
+        cdate_str = (
+            datetime.datetime.fromtimestamp(
+                inv.cdate / 1000, tz=datetime.timezone.utc
+            ).isoformat()
+            if inv.cdate
+            else None
+        )
+        expdate_str = (
+            datetime.datetime.fromtimestamp(
+                inv.expdate / 1000, tz=datetime.timezone.utc
+            ).isoformat()
+            if inv.expdate
+            else None
+        )
+
+        return {
+            "venue_id": venue_id,
+            "paper_number": sub_num,
+            "submission_id": sub_id,
+            "title": title,
+            "invitation_id": inv.id,
+            "is_open": is_open,
+            "start_date": cdate_str,
+            "expiry_date": expdate_str,
+            "ac_signature": sig,
+            "mandatory_readers": mandatory,
+            "optional_readers": optional,
+            "in_group_readers": in_group,
+            "reviewer_groups": sorted(rev_groups),
+            "max_comment_length": 5000,
+            "max_title_length": 500,
+            "reader_shortcuts": {
+                "reviewers (default)": "All assigned Reviewers + AC + SACs + Program Chairs",
+                "sac_only": "Internal discussion between AC, SACs, and Program Chairs",
+                "authors": "Visible to Authors as well (if allowed by conference stage)",
+            },
+        }
+
+    # Batch summary when no paper is specified
+    assigned = _get_assigned_submissions(client, venue_id, "Area_Chairs")
+    active_submissions = [s for s in assigned if not _is_withdrawn(s)]
+
+    sample_options = None
+    if active_submissions:
+        try:
+            sample_sub = active_submissions[0]
+            sample_options = get_forum_message_options(
+                venue_id=venue_id, submission_id_or_number=sample_sub.number
+            )
+        except Exception:
+            pass
+
+    papers_summary = [
+        {
+            "number": s.number,
+            "id": s.id,
+            "title": _get_field(s, "title", "No Title"),
+            "is_withdrawn": _is_withdrawn(s),
+        }
+        for s in assigned
+    ]
+
+    return {
+        "venue_id": venue_id,
+        "total_assigned_papers": len(assigned),
+        "active_assigned_papers": len(active_submissions),
+        "withdrawn_papers": len(assigned) - len(active_submissions),
+        "sample_paper_options": sample_options,
+        "papers": papers_summary,
+    }
+
+
+@mcp.tool()
+@retry_on_429()
+def post_forum_message(
+    venue_id: str,
+    submission_id_or_number: Any,
+    comment: str,
+    title: Optional[str] = None,
+    readers: Optional[Any] = None,
+    replyto: Optional[str] = None,
+    signature: Optional[str] = None,
+    comment_id: Optional[str] = None,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """
+    Post a forum message (Official Comment) to an assigned paper as Area Chair.
+
+    HINT: For safety, dry_run defaults to True. Always preview the message first.
+    Set dry_run=False ONLY after confirming the message content and audience.
+
+    Args:
+        venue_id: Venue ID (e.g. 'ICLR.cc/2027/Conference').
+        submission_id_or_number: Paper number (e.g. 5963), note ID (e.g. 'QDwvThge4H'), or OpenReview URL.
+        comment: Markdown text of the message (max 5000 characters).
+        title: Optional summary or title for the comment (max 500 characters).
+        readers: Who can read the comment. Options:
+            - None or 'reviewers' / 'all_reviewers' (default): Visible to all assigned Reviewers, AC, SACs, and Program Chairs.
+            - 'sac_only' or 'private': Visible only to AC, SACs, and Program Chairs.
+            - 'authors': Visible to Authors as well (if allowed by conference stage).
+            - List of groups or short names, e.g. ['Reviewer_6P8j'] to target a specific reviewer.
+            Note: Mandatory readers (PCs, SACs) are always automatically included.
+        replyto: Optional Note ID to reply to (e.g. a specific review or comment). If None, replies to the root submission.
+        signature: Optional signature. If None, auto-discovers the paper's anonymized AC group.
+        comment_id: Optional existing comment Note ID to edit/update an existing message instead of posting a new one.
+        dry_run: If True (default), validates all inputs and previews the payload without posting to OpenReview.
+
+    Returns:
+        Dict with status ('preview' or 'success'), paper details, note ID, readers, and message preview.
+    """
+    client = get_client()
+
+    if not comment or not comment.strip():
+        raise ValueError("`comment` cannot be empty.")
+
+    comment_clean = comment.strip()
+    if len(comment_clean) > 5000:
+        raise ValueError(
+            f"`comment` exceeds 5000 characters (length: {len(comment_clean)})."
+        )
+
+    title_clean = title.strip() if title else None
+    if title_clean and len(title_clean) > 500:
+        raise ValueError(
+            f"`title` exceeds 500 characters (length: {len(title_clean)})."
+        )
+
+    target_sub = _resolve_submission(client, venue_id, submission_id_or_number)
+    sub_num = target_sub.number
+    sub_id = target_sub.id
+    paper_title = _get_field(target_sub, "title", "No Title")
+    forum_id = target_sub.forum or sub_id
+    target_replyto = (
+        replyto.strip() if (replyto and str(replyto).strip()) else sub_id
+    )
+
+    inv = _get_comment_invitation(client, venue_id, sub_num)
+    inv_id = inv.id
+
+    sig = (
+        signature.strip()
+        if (signature and str(signature).strip())
+        else _discover_ac_signature(client, venue_id, sub_num)
+    )
+    resolved_readers = _resolve_forum_readers(
+        client, venue_id, sub_num, readers, inv
+    )
+
+    note_content: Dict[str, Any] = {"comment": {"value": comment_clean}}
+    if title_clean:
+        note_content["title"] = {"value": title_clean}
+
+    if dry_run:
+        return {
+            "status": "preview",
+            "action": "update" if comment_id else "create",
+            "paper_number": sub_num,
+            "submission_id": sub_id,
+            "paper_title": paper_title,
+            "invitation": inv_id,
+            "signature": sig,
+            "readers": resolved_readers,
+            "replyto": target_replyto,
+            "comment_title": title_clean,
+            "comment_preview": comment_clean[:200]
+            + ("..." if len(comment_clean) > 200 else ""),
+            "full_comment": comment_clean,
+            "is_update": bool(comment_id),
+            "comment_id": comment_id,
+            "message": "Dry run successful. Forum message was validated but NOT posted to OpenReview. Set dry_run=False to post.",
+        }
+
+    note_kwargs: Dict[str, Any] = {
+        "forum": forum_id,
+        "replyto": target_replyto,
+        "signatures": [sig],
+        "readers": resolved_readers,
+        "writers": [venue_id, sig],
+        "content": note_content,
+    }
+    if comment_id:
+        note_kwargs["id"] = comment_id
+
+    note_obj = Note(**note_kwargs)
+    edit_response = client.post_note_edit(
+        invitation=inv_id,
+        signatures=[sig],
+        note=note_obj,
+    )
+    note_res = edit_response.get("note", {})
+    return {
+        "status": "success",
+        "action": "updated" if comment_id else "created",
+        "paper_number": sub_num,
+        "submission_id": sub_id,
+        "paper_title": paper_title,
+        "note_id": note_res.get("id") or edit_response.get("id"),
+        "invitation": inv_id,
+        "signature": sig,
+        "readers": resolved_readers,
+        "comment_title": title_clean,
+    }
+
+
+@mcp.tool()
+@retry_on_429()
+def batch_post_forum_messages(
+    venue_id: str,
+    comment: str,
+    submissions: Optional[List[Any]] = None,
+    title: Optional[str] = None,
+    readers: Optional[Any] = None,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """
+    Post a forum message across multiple papers in the AC's batch.
+
+    Supports templating in `comment` and `title` using:
+        - {number}: Paper number (e.g. 5963)
+        - {title}: Paper title
+        - {paper_id}: OpenReview submission ID
+        - {forum_url}: OpenReview forum URL
+
+    HINT: For safety, dry_run defaults to True. Always preview the messages first.
+
+    Args:
+        venue_id: Venue ID (e.g. 'ICLR.cc/2027/Conference').
+        comment: Markdown text of the message (can include template placeholders).
+        submissions: List of paper numbers or note IDs. If None or empty, targets all
+            active assigned papers for the current Area Chair in the venue.
+        title: Optional title/summary for the comments (can include template placeholders).
+        readers: Who can read the comment (e.g. 'reviewers' [default], 'sac_only', etc.).
+        dry_run: If True (default), previews all messages without posting.
+    """
+    client = get_client()
+
+    if not comment or not comment.strip():
+        raise ValueError("`comment` cannot be empty.")
+
+    if submissions is None or not submissions or submissions == "all":
+        assigned = _get_assigned_submissions(client, venue_id, "Area_Chairs")
+        targets = [s for s in assigned if not _is_withdrawn(s)]
+    else:
+        targets = []
+        for s in submissions:
+            targets.append(_resolve_submission(client, venue_id, s))
+
+    if not targets:
+        return {
+            "status": "warning",
+            "message": "No active submissions found to post forum messages.",
+            "total": 0,
+            "results": [],
+            "errors": [],
+        }
+
+    results = []
+    errors = []
+
+    for idx, sub in enumerate(targets):
+        paper_num = sub.number
+        paper_title = _get_field(sub, "title", "No Title")
+        forum_url = (
+            f"https://openreview.net/forum?id={getattr(sub, 'forum', None) or sub.id}"
+        )
+
+        formatted_comment = _format_template(
+            comment,
+            number=paper_num,
+            title=paper_title,
+            paper_id=sub.id,
+            forum_url=forum_url,
+        )
+        formatted_title = (
+            _format_template(
+                title,
+                number=paper_num,
+                title=paper_title,
+                paper_id=sub.id,
+                forum_url=forum_url,
+            )
+            if title
+            else None
+        )
+
+        try:
+            res = post_forum_message(
+                venue_id=venue_id,
+                submission_id_or_number=sub,
+                comment=formatted_comment,
+                title=formatted_title,
+                readers=readers,
+                dry_run=dry_run,
+            )
+            results.append(res)
+        except Exception as e:
+            errors.append({
+                "paper_number": paper_num,
+                "submission_id": sub.id,
+                "title": paper_title,
+                "error": str(e),
+            })
+
+        if not dry_run and idx < len(targets) - 1:
+            time.sleep(1.0)
+
+    return {
+        "status": "success"
+        if not errors
+        else ("partial_success" if results else "error"),
+        "dry_run": dry_run,
+        "total": len(targets),
+        "succeeded_count": len(results),
+        "failed_count": len(errors),
+        "results": results,
+        "errors": errors,
+    }
 
 
 if __name__ == "__main__":

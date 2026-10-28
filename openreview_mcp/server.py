@@ -3795,6 +3795,13 @@ def _discover_ac_signature(client: Any, venue_id: str, submission_number: int) -
         for g in groups:
             if re.search(r"Area_Chair.*", g.id) and not g.id.endswith("/Area_Chairs"):
                 return g.id
+        # Action Editors (e.g. TMLR) sign as {venue}/Paper<N>/Action_Editor_xxxx
+        groups = client.get_groups(
+            prefix=f"{venue_id}/Paper{submission_number}/Action_Editor_",
+            signatory=client.profile.id,
+        )
+        if groups:
+            return groups[0].id
     return sig
 
 
@@ -3803,6 +3810,8 @@ def _get_comment_invitation(client: Any, venue_id: str, submission_number: int) 
     candidates = [
         f"{venue_id}/Submission{submission_number}/-/Official_Comment",
         f"{venue_id}/Submission{submission_number}/-/Comment",
+        # Journal-style venues (e.g. TMLR) name per-paper groups Paper<N>
+        f"{venue_id}/Paper{submission_number}/-/Official_Comment",
     ]
     for inv_id in candidates:
         try:
@@ -3828,6 +3837,42 @@ def _get_comment_invitation(client: Any, venue_id: str, submission_number: int) 
     )
 
 
+def _resolve_action_editor_readers(
+    venue_id: str, submission_number: int, readers: Optional[Any]
+) -> List[str]:
+    """
+    Readers for a comment on a journal-style (TMLR) paper, whose groups are
+    {venue}/Paper<N>/{Action_Editors,Reviewers,Authors}. Editors-in-Chief and the
+    paper's Action Editors are always included.
+    """
+    paper = f"{venue_id}/Paper{submission_number}"
+    resolved = [f"{venue_id}/Editors_In_Chief", f"{paper}/Action_Editors"]
+
+    if isinstance(readers, str):
+        r_str = readers.strip().lower()
+        if r_str in ["", "all", "reviewers", "all_reviewers"]:
+            readers = [f"{paper}/Reviewers"]
+        elif r_str in ["sac_only", "private", "mandatory"]:
+            readers = []
+        elif r_str in ["authors", "author"]:
+            readers = [f"{paper}/Reviewers", f"{paper}/Authors"]
+        elif r_str in ["public", "everyone"]:
+            readers = ["everyone"]
+        else:
+            readers = [readers]
+    elif readers is None:
+        readers = [f"{paper}/Reviewers"]
+
+    for r in readers:
+        r = str(r).strip()
+        if not r:
+            continue
+        expanded = r if (r == "everyone" or "/" in r) else f"{paper}/{r}"
+        if expanded not in resolved:
+            resolved.append(expanded)
+    return resolved
+
+
 def _resolve_forum_readers(
     client: Any,
     venue_id: str,
@@ -3842,6 +3887,9 @@ def _resolve_forum_readers(
     Supports explicit group list or reviewer IDs.
     """
     sub_prefix = f"{venue_id}/Submission{submission_number}"
+
+    if f"/Paper{submission_number}/" in getattr(invitation, "id", ""):
+        return _resolve_action_editor_readers(venue_id, submission_number, readers)
 
     # Extract mandatory reader definitions from invitation
     items = (

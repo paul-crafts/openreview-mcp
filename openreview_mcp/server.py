@@ -203,6 +203,19 @@ def search_venues(query: str) -> List[Dict[str, str]]:
 AC_ROLE_NAMES = ("Area_Chairs", "Action_Editors")
 
 
+def _get_ac_role_and_edges(
+    client, venue_id: str, my_id: str
+) -> "tuple[Optional[str], List[Any]]":
+    """(role, assignment edges) for the first of Area_Chairs / Action_Editors with edges."""
+    for role in AC_ROLE_NAMES:
+        edges = client.get_all_edges(
+            invitation=f"{venue_id}/{role}/-/Assignment", tail=my_id
+        )
+        if edges:
+            return role, edges
+    return None, []
+
+
 def _get_ac_assignment_edges(
     client, venue_id: str, my_id: str, assignment_invitation: Optional[str] = None
 ) -> List[Any]:
@@ -212,13 +225,7 @@ def _get_ac_assignment_edges(
     """
     if assignment_invitation:
         return client.get_all_edges(invitation=assignment_invitation, tail=my_id)
-    for role in AC_ROLE_NAMES:
-        edges = client.get_all_edges(
-            invitation=f"{venue_id}/{role}/-/Assignment", tail=my_id
-        )
-        if edges:
-            return edges
-    return []
+    return _get_ac_role_and_edges(client, venue_id, my_id)[1]
 
 
 def _get_assigned_submissions(
@@ -709,10 +716,14 @@ def get_review_status_report(venue_id: str) -> List[Dict[str, Any]]:
     my_id = client.profile.id
 
     # 1. Get assigned submissions
-    ac_assignments = _get_ac_assignment_edges(client, venue_id, my_id)
+    ac_role, ac_assignments = _get_ac_role_and_edges(client, venue_id, my_id)
     submission_ids = [edge.head for edge in ac_assignments]
     if not submission_ids:
         return []
+    # Action-Editor venues (e.g. TMLR) have no Official_Review invitation: reviewers
+    # submit a "Review" and/or an "Official_Recommendation". Area Chair venues are
+    # unchanged and keep matching Official_Review only.
+    is_action_editor = ac_role == "Action_Editors"
 
     # 2. Get all reviewer assignments for these submissions
     # We can filter by 'head' if the API supports it, or get all and filter locally
@@ -757,6 +768,14 @@ def get_review_status_report(venue_id: str) -> List[Dict[str, Any]]:
             n
             for n in all_notes
             if n.forum == sub_id
+            and any(
+                inv.endswith(("/-/Review", "/-/Official_Recommendation"))
+                for inv in n.invitations
+            )
+        ] if is_action_editor else [
+            n
+            for n in all_notes
+            if n.forum == sub_id
             and any("Official_Review" in inv for inv in n.invitations)
         ]
 
@@ -767,6 +786,9 @@ def get_review_status_report(venue_id: str) -> List[Dict[str, Any]]:
                 submitted_by.append(resolved)
 
         missing = [rev for rev in sub_reviewers if rev not in submitted_by]
+        if is_action_editor:
+            # A reviewer may post both a review and a recommendation: count them once.
+            sub_reviews = [rev for rev in set(submitted_by) if rev in sub_reviewers]
 
         report.append(
             {

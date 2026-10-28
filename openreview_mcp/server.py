@@ -198,6 +198,29 @@ def search_venues(query: str) -> List[Dict[str, str]]:
     return [v for v in all_venues if query in v["id"].lower()]
 
 
+# Venues name their handling-editor role differently: conferences use Area_Chairs,
+# journals such as TMLR use Action_Editors. Both use the same Assignment-edge convention.
+AC_ROLE_NAMES = ("Area_Chairs", "Action_Editors")
+
+
+def _get_ac_assignment_edges(
+    client, venue_id: str, my_id: str, assignment_invitation: Optional[str] = None
+) -> List[Any]:
+    """
+    Assignment edges for the current user as Area Chair or, failing that, Action Editor.
+    If assignment_invitation is given it is used verbatim instead of guessing.
+    """
+    if assignment_invitation:
+        return client.get_all_edges(invitation=assignment_invitation, tail=my_id)
+    for role in AC_ROLE_NAMES:
+        edges = client.get_all_edges(
+            invitation=f"{venue_id}/{role}/-/Assignment", tail=my_id
+        )
+        if edges:
+            return edges
+    return []
+
+
 def _get_assigned_submissions(
     client, venue_id: str, role: str = "Area_Chairs"
 ) -> List[Any]:
@@ -208,9 +231,12 @@ def _get_assigned_submissions(
     (not something individual venues customize) — safe to keep deterministic.
     """
     my_id = client.profile.id
-    assignments = client.get_all_edges(
-        invitation=f"{venue_id}/{role}/-/Assignment", tail=my_id
-    )
+    if role == "Area_Chairs":
+        assignments = _get_ac_assignment_edges(client, venue_id, my_id)
+    else:
+        assignments = client.get_all_edges(
+            invitation=f"{venue_id}/{role}/-/Assignment", tail=my_id
+        )
     submission_ids = [edge.head for edge in assignments]
     if not submission_ids:
         return []
@@ -245,10 +271,26 @@ def _sanitize_filename_component(text: str, max_len: int = 50) -> str:
 
 @mcp.tool()
 @retry_on_429()
-def get_ac_submissions(venue_id: str) -> List[Dict[str, Any]]:
-    """Get submissions assigned to the current user as an Area Chair."""
+def get_ac_submissions(
+    venue_id: str, assignment_invitation: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    Get submissions assigned to the current user as an Area Chair or Action Editor.
+
+    Args:
+        venue_id: The venue ID (e.g. 'ICLR.cc/2027/Conference' or 'TMLR').
+        assignment_invitation: Optional explicit assignment-edge invitation
+            (e.g. 'TMLR/Action_Editors/-/Assignment'). If omitted, Area_Chairs and
+            then Action_Editors are tried.
+    """
     client = get_client()
-    submissions = _get_assigned_submissions(client, venue_id, "Area_Chairs")
+    if assignment_invitation:
+        edges = _get_ac_assignment_edges(
+            client, venue_id, client.profile.id, assignment_invitation
+        )
+        submissions = [client.get_note(e.head) for e in edges]
+    else:
+        submissions = _get_assigned_submissions(client, venue_id, "Area_Chairs")
 
     return [
         {
@@ -667,9 +709,7 @@ def get_review_status_report(venue_id: str) -> List[Dict[str, Any]]:
     my_id = client.profile.id
 
     # 1. Get assigned submissions
-    ac_assignments = client.get_all_edges(
-        invitation=f"{venue_id}/Area_Chairs/-/Assignment", tail=my_id
-    )
+    ac_assignments = _get_ac_assignment_edges(client, venue_id, my_id)
     submission_ids = [edge.head for edge in ac_assignments]
     if not submission_ids:
         return []
@@ -2217,9 +2257,7 @@ def get_ac_updates(
     since_ts = _parse_since(since)
 
     # Get assigned submissions as AC
-    assignments = client.get_all_edges(
-        invitation=f"{venue_id}/Area_Chairs/-/Assignment", tail=my_id
-    )
+    assignments = _get_ac_assignment_edges(client, venue_id, my_id)
     forums = [e.head for e in assignments]
     if not forums:
         return []
@@ -2321,9 +2359,7 @@ def get_discussion_updates(venue_id: str, limit: int = 10) -> List[Dict[str, Any
     my_id = client.profile.id
 
     # Get all assigned submissions (AC or Reviewer)
-    ac_assignments = client.get_all_edges(
-        invitation=f"{venue_id}/Area_Chairs/-/Assignment", tail=my_id
-    )
+    ac_assignments = _get_ac_assignment_edges(client, venue_id, my_id)
     rev_assignments = client.get_all_edges(
         invitation=f"{venue_id}/Reviewers/-/Assignment", tail=my_id
     )
@@ -2543,9 +2579,7 @@ def get_inbox_summary(
     import time
 
     # Get all assigned forums (AC or Reviewer)
-    ac_assignments = client.get_all_edges(
-        invitation=f"{venue_id}/Area_Chairs/-/Assignment", tail=my_id
-    )
+    ac_assignments = _get_ac_assignment_edges(client, venue_id, my_id)
     rev_assignments = client.get_all_edges(
         invitation=f"{venue_id}/Reviewers/-/Assignment", tail=my_id
     )
@@ -2621,9 +2655,7 @@ def get_invitation_status(
     my_id = client.profile.id
 
     # Get all papers assigned to me as AC
-    assignments = client.get_all_edges(
-        invitation=f"{venue_id}/Area_Chairs/-/Assignment", tail=my_id
-    )
+    assignments = _get_ac_assignment_edges(client, venue_id, my_id)
     forums = [e.head for e in assignments]
     if not forums:
         return []

@@ -24,6 +24,8 @@ A Model Context Protocol (MCP) server for interacting with OpenReview.net API v2
 - `get_review_status_report`: Check review progress for your papers.
 - `send_bulk_message`: Email reviewers/authors (supports `reply_to`, `invitation`, `signature`, `parent_group`).
 - `get_reviewer_emails`: Obtain preferred emails (unmasks via logs if `venue_id` is provided).
+- `get_group_members`: Member IDs of any readable group (e.g. a `Reviewer_xxxx` handle -> `~Name1`; `Reviewers` -> anonymous group IDs).
+- `get_profiles`: Display name and preferred email for a list of `~Name1` IDs (generalizes `get_profile`).
 - `get_ac_updates`: Get new reviews/comments for papers you chair (supports `since`).
 - `get_reviewer_updates`: Get new comments/rebuttals for papers you review (supports `since`).
 - `get_author_updates`: Get new feedback for your own papers (supports `since`).

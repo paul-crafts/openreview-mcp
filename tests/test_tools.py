@@ -75,6 +75,7 @@ def test_get_invitation_status_basic(mock_client):
     # Mock confirmations
     mock_conf = MagicMock()
     mock_conf.signatures = ["test.venue/Submission1/Reviewer_1"]
+    mock_conf.invitations = ["test.venue/Submission1/-/Review_Confirmation"]
     mock_client.get_all_notes.return_value = [mock_conf]
 
     # Mock group resolution

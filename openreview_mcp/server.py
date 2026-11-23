@@ -238,7 +238,7 @@ def _get_assigned_submissions(
     (not something individual venues customize) — safe to keep deterministic.
     """
     my_id = client.profile.id
-    if role == "Area_Chairs":
+    if role in ("Area_Chairs", "Area_Chair", "AC"):
         assignments = _get_ac_assignment_edges(client, venue_id, my_id)
     else:
         assignments = client.get_all_edges(
@@ -770,13 +770,16 @@ def get_review_status_report(venue_id: str) -> List[Dict[str, Any]]:
             if n.forum == sub_id
             and any(
                 inv.endswith(("/-/Review", "/-/Official_Recommendation"))
-                for inv in n.invitations
+                for inv in (getattr(n, "invitations", None) or [getattr(n, "invitation", "")])
             )
         ] if is_action_editor else [
             n
             for n in all_notes
             if n.forum == sub_id
-            and any("Official_Review" in inv for inv in n.invitations)
+            and any(
+                ("Official_Review" in inv or inv.endswith("/Review"))
+                for inv in (getattr(n, "invitations", None) or [getattr(n, "invitation", "")])
+            )
         ]
 
         submitted_by = []
@@ -2587,6 +2590,91 @@ def get_reviewer_emails(
 
 @mcp.tool()
 @retry_on_429()
+def get_group_members(group_id: str) -> Dict[str, Any]:
+    """
+    Get the member IDs of any group the caller can read.
+
+    Examples (ICLR 2027, paper 5963):
+    - `ICLR.cc/2027/Conference/Submission5963/Reviewer_gHLx` -> that reviewer's
+      `~Name1` profile ID (the handle-to-person mapping).
+    - `ICLR.cc/2027/Conference/Submission5963/Reviewers` -> the anonymous group
+      IDs (e.g. `.../Reviewer_gHLx`), usable as message recipients.
+
+    The same lookup works for ACs, SACs, a paper's authors, etc.
+    Use `get_profiles` to turn `~Name1` member IDs into names and emails.
+    """
+    client = get_client()
+    group = client.get_group(group_id)
+    return {"group_id": group.id, "members": list(group.members or [])}
+
+
+def _profile_preferred_name(profile: Any) -> Optional[str]:
+    """Preferred (else first) fullname from a v2 profile, or None."""
+    names = (profile.content or {}).get("names") or []
+    preferred = [n for n in names if isinstance(n, dict) and n.get("preferred")]
+    chosen = preferred[0] if preferred else (names[0] if names else None)
+    if isinstance(chosen, dict):
+        return chosen.get("fullname") or None
+    return None
+
+
+def _profile_preferred_email(profile: Any) -> Optional[str]:
+    """First unmasked email from a v2 profile, or None."""
+    content = profile.content or {}
+    for field in ("preferredEmail", "emailsConfirmed", "emails"):
+        val = content.get(field)
+        if isinstance(val, dict):
+            val = val.get("value")
+        candidates = val if isinstance(val, list) else [val]
+        for e in candidates:
+            if e and isinstance(e, str) and "@" in e and "****" not in e:
+                return e
+    return None
+
+
+@mcp.tool()
+@retry_on_429()
+def get_profiles(profile_ids: List[str]) -> List[Dict[str, Any]]:
+    """
+    Get the display name and preferred email for a list of `~Name1` profile IDs.
+
+    Generalizes `get_profile` (which only returns your own profile) to arbitrary
+    IDs. Returns one entry per requested ID, in input order:
+    `{"id", "name", "email"}`. `name`/`email` are null when the profile was not
+    found or the email is masked; use `get_reviewer_emails` with a `venue_id` to
+    attempt unmasking via fallbacks.
+    """
+    client = get_client()
+    found: Dict[str, Any] = {}
+    for i in range(0, len(profile_ids), 50):
+        batch = profile_ids[i : i + 50]
+        try:
+            for p in client.get_profiles(id=batch):
+                found[p.id] = p
+        except Exception:
+            # Fall back to one-by-one lookup so a bad ID doesn't sink the batch
+            for pid in batch:
+                try:
+                    p = client.get_profile(pid)
+                    found[p.id] = p
+                except Exception:
+                    pass
+
+    results = []
+    for pid in profile_ids:
+        p = found.get(pid)
+        results.append(
+            {
+                "id": pid,
+                "name": _profile_preferred_name(p) if p else None,
+                "email": _profile_preferred_email(p) if p else None,
+            }
+        )
+    return results
+
+
+@mcp.tool()
+@retry_on_429()
 def get_inbox_summary(
     venue_id: str, since: Optional[str] = None, limit: int = 50
 ) -> List[Dict[str, Any]]:
@@ -3392,6 +3480,13 @@ def _resolve_submission(client: Any, venue_id: str, submission_id_or_number: Any
                 return notes[0]
         except Exception:
             pass
+
+        try:
+            notes = client.get_notes(invitation=f"{venue_id}/-/Submission", number=target_num)
+            if notes:
+                return notes[0]
+        except Exception:
+            pass
         raise ValueError(f"Could not find submission number {target_num} in venue '{venue_id}'.")
 
     # 2. If it's a URL or note ID
@@ -3783,25 +3878,45 @@ def _format_template(text: Optional[str], **kwargs) -> Optional[str]:
 
 
 def _discover_ac_signature(client: Any, venue_id: str, submission_number: int) -> str:
-    """Discover the paper-specific anonymized AC signature for a submission."""
-    sig, _ = _get_submission_contact_info(
-        client, venue_id, submission_number, role="Area_Chair"
-    )
-    if sig == client.profile.id or "Area_Chair" not in sig:
-        groups = client.get_groups(
-            member=client.profile.id,
-            prefix=f"{venue_id}/Submission{submission_number}/Area_Chair",
+    """Discover the paper-specific anonymized AC/AE signature for a submission."""
+    for role_name in ["Area_Chair", "Action_Editor"]:
+        sig, _ = _get_submission_contact_info(
+            client, venue_id, submission_number, role=role_name
         )
-        for g in groups:
-            if re.search(r"Area_Chair.*", g.id) and not g.id.endswith("/Area_Chairs"):
-                return g.id
-        # Action Editors (e.g. TMLR) sign as {venue}/Paper<N>/Action_Editor_xxxx
+        if sig != client.profile.id and (role_name in sig):
+            return sig
+
+    prefixes = [
+        f"{venue_id}/Submission{submission_number}/Area_Chair",
+        f"{venue_id}/Submission{submission_number}/Action_Editor",
+        f"{venue_id}/Paper{submission_number}/Area_Chair",
+        f"{venue_id}/Paper{submission_number}/Action_Editor",
+    ]
+    for pfx in prefixes:
+        try:
+            groups = client.get_groups(
+                member=client.profile.id,
+                prefix=pfx,
+            )
+            for g in groups:
+                if re.search(r"(Area_Chair|Action_Editor).*", g.id) and not (
+                    g.id.endswith("/Area_Chairs") or g.id.endswith("/Action_Editors")
+                ):
+                    return g.id
+        except Exception:
+            pass
+
+    # Action Editors (e.g. TMLR) sign as {venue}/Paper<N>/Action_Editor_xxxx; the
+    # groups they can sign with are found as signatory, not always as member.
+    try:
         groups = client.get_groups(
             prefix=f"{venue_id}/Paper{submission_number}/Action_Editor_",
             signatory=client.profile.id,
         )
         if groups:
             return groups[0].id
+    except Exception:
+        pass
     return sig
 
 
@@ -3812,6 +3927,7 @@ def _get_comment_invitation(client: Any, venue_id: str, submission_number: int) 
         f"{venue_id}/Submission{submission_number}/-/Comment",
         # Journal-style venues (e.g. TMLR) name per-paper groups Paper<N>
         f"{venue_id}/Paper{submission_number}/-/Official_Comment",
+        f"{venue_id}/Paper{submission_number}/-/Comment",
     ]
     for inv_id in candidates:
         try:
@@ -3823,54 +3939,20 @@ def _get_comment_invitation(client: Any, venue_id: str, submission_number: int) 
 
     # Fallback search
     try:
-        invs = client.get_invitations(
-            prefix=f"{venue_id}/Submission{submission_number}/-/"
-        )
-        for inv in invs:
-            if "comment" in inv.id.lower():
-                return inv
+        for pfx in [
+            f"{venue_id}/Submission{submission_number}/-/",
+            f"{venue_id}/Paper{submission_number}/-/",
+        ]:
+            invs = client.get_invitations(prefix=pfx)
+            for inv in invs:
+                if "comment" in inv.id.lower():
+                    return inv
     except Exception:
         pass
 
     raise ValueError(
         f"Could not find comment invitation for submission {submission_number} in venue '{venue_id}'."
     )
-
-
-def _resolve_action_editor_readers(
-    venue_id: str, submission_number: int, readers: Optional[Any]
-) -> List[str]:
-    """
-    Readers for a comment on a journal-style (TMLR) paper, whose groups are
-    {venue}/Paper<N>/{Action_Editors,Reviewers,Authors}. Editors-in-Chief and the
-    paper's Action Editors are always included.
-    """
-    paper = f"{venue_id}/Paper{submission_number}"
-    resolved = [f"{venue_id}/Editors_In_Chief", f"{paper}/Action_Editors"]
-
-    if isinstance(readers, str):
-        r_str = readers.strip().lower()
-        if r_str in ["", "all", "reviewers", "all_reviewers"]:
-            readers = [f"{paper}/Reviewers"]
-        elif r_str in ["sac_only", "private", "mandatory"]:
-            readers = []
-        elif r_str in ["authors", "author"]:
-            readers = [f"{paper}/Reviewers", f"{paper}/Authors"]
-        elif r_str in ["public", "everyone"]:
-            readers = ["everyone"]
-        else:
-            readers = [readers]
-    elif readers is None:
-        readers = [f"{paper}/Reviewers"]
-
-    for r in readers:
-        r = str(r).strip()
-        if not r:
-            continue
-        expanded = r if (r == "everyone" or "/" in r) else f"{paper}/{r}"
-        if expanded not in resolved:
-            resolved.append(expanded)
-    return resolved
 
 
 def _resolve_forum_readers(
@@ -3883,13 +3965,16 @@ def _resolve_forum_readers(
     """
     Resolve and validate readers for a forum comment Note.
     Guarantees that all mandatory readers from the invitation schema are included.
-    Supports shortcuts: 'reviewers' / 'all_reviewers' / None, 'sac_only', 'authors'.
+    Supports shortcuts: 'reviewers' / 'all_reviewers' / None, 'sac_only', 'authors', 'everyone'.
     Supports explicit group list or reviewer IDs.
     """
-    sub_prefix = f"{venue_id}/Submission{submission_number}"
-
-    if f"/Paper{submission_number}/" in getattr(invitation, "id", ""):
-        return _resolve_action_editor_readers(venue_id, submission_number, readers)
+    inv_id = getattr(invitation, "id", "")
+    if f"/Paper{submission_number}" in inv_id:
+        sub_prefix = f"{venue_id}/Paper{submission_number}"
+        is_paper_prefix = True
+    else:
+        sub_prefix = f"{venue_id}/Submission{submission_number}"
+        is_paper_prefix = False
 
     # Extract mandatory reader definitions from invitation
     items = (
@@ -3903,11 +3988,16 @@ def _resolve_forum_readers(
         for item in items
         if item.get("optional") is False and "value" in item
     ]
-    if not mandatory:
+    if not mandatory and not is_paper_prefix:
         mandatory = [
             f"{venue_id}/Program_Chairs",
             f"{sub_prefix}/Senior_Area_Chairs",
         ]
+
+    item_values = [item.get("value") for item in items if "value" in item]
+    has_action_editors = f"{sub_prefix}/Action_Editors" in item_values or "Action_Editors" in inv_id
+    ac_group = f"{sub_prefix}/Action_Editors" if has_action_editors else f"{sub_prefix}/Area_Chairs"
+    pc_or_eic = f"{venue_id}/Editors_In_Chief" if has_action_editors else f"{venue_id}/Program_Chairs"
 
     # Normalize readers input
     if (
@@ -3918,27 +4008,37 @@ def _resolve_forum_readers(
         or readers == "all_reviewers"
     ):
         resolved = list(mandatory)
-        for opt in [f"{sub_prefix}/Area_Chairs", f"{sub_prefix}/Reviewers"]:
+        for opt in [ac_group, f"{sub_prefix}/Reviewers"]:
             if opt not in resolved:
                 resolved.append(opt)
+        if has_action_editors and pc_or_eic not in resolved and pc_or_eic in item_values:
+            resolved.insert(0, pc_or_eic)
         return resolved
 
     if isinstance(readers, str):
         r_str = readers.strip().lower()
-        if r_str in ["sac_only", "private", "mandatory"]:
+        if r_str == "everyone":
+            return ["everyone"]
+        elif r_str in ["sac_only", "private", "mandatory"]:
             resolved = list(mandatory)
-            if f"{sub_prefix}/Area_Chairs" not in resolved:
-                resolved.append(f"{sub_prefix}/Area_Chairs")
+            if ac_group not in resolved:
+                resolved.append(ac_group)
+            if has_action_editors and pc_or_eic not in resolved and pc_or_eic in item_values:
+                resolved.insert(0, pc_or_eic)
             return resolved
         elif r_str in ["authors", "author", "public"]:
+            if is_paper_prefix and "everyone" in item_values:
+                return ["everyone"]
             resolved = list(mandatory)
             for opt in [
-                f"{sub_prefix}/Area_Chairs",
+                ac_group,
                 f"{sub_prefix}/Reviewers",
                 f"{sub_prefix}/Authors",
             ]:
                 if opt not in resolved:
                     resolved.append(opt)
+            if has_action_editors and pc_or_eic not in resolved and pc_or_eic in item_values:
+                resolved.insert(0, pc_or_eic)
             return resolved
         else:
             readers = [readers]
@@ -3948,9 +4048,13 @@ def _resolve_forum_readers(
         r = str(r).strip()
         if not r:
             continue
+        if r == "everyone":
+            if "everyone" not in resolved:
+                resolved.append("everyone")
+            continue
         if not r.startswith(venue_id) and "/" not in r:
             expanded = f"{sub_prefix}/{r}"
-        elif r.startswith("Submission"):
+        elif r.startswith("Submission") or r.startswith("Paper"):
             expanded = f"{venue_id}/{r}"
         else:
             expanded = r
@@ -3958,8 +4062,8 @@ def _resolve_forum_readers(
         if expanded not in resolved:
             resolved.append(expanded)
 
-    if f"{sub_prefix}/Area_Chairs" not in resolved:
-        resolved.append(f"{sub_prefix}/Area_Chairs")
+    if ac_group not in resolved and "everyone" not in resolved:
+        resolved.append(ac_group)
 
     return resolved
 
@@ -4013,6 +4117,11 @@ def get_forum_message_options(
             g.id
             for g in client.get_groups(
                 prefix=f"{venue_id}/Submission{sub_num}/Reviewer_"
+            )
+        ] + [
+            g.id
+            for g in client.get_groups(
+                prefix=f"{venue_id}/Paper{sub_num}/Reviewer_"
             )
         ]
         sig = _discover_ac_signature(client, venue_id, sub_num)

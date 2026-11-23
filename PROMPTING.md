@@ -47,6 +47,12 @@ schema — don't load it unless you're actually doing this. Tools involved:
 `dump_ac_batch_submissions` → (you identify reviews & synthesize) →
 `verify_quotes_in_batch` → `render_meta_review_report`.
 
+### Area Chair (AC) - "The Discussion-Phase Driver" (Claude Code skills)
+For the reviewer-AC discussion and decision phases, the `skills/openreview-ac-*` Agent Skills chain the tools into a workflow:
+`openreview-ac-venue-setup` (ask for this venue's guidelines) → `openreview-ac-sync` (dump, diff, PDFs, dashboard) →
+`openreview-ac-dossier` (verbatim concern ledger, rebuttal mapping, fact-checks) → `openreview-ac-messages`
+(red-flag scan, discussion threads and short emails drafted by subagents, fact-checked, sent only through the approval gate; later a final-recommendation wave) → `openreview-ac-metareview` (TL;DR, then refine the AC's own draft).
+
 ### Reviewer - "The Feedback Provider"
 1. **Bidding**:
    - `get_bidding_info(venue_id)` to list papers for bidding.

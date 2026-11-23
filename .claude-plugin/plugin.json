@@ -1,0 +1,22 @@
+{
+  "name": "openreview",
+  "description": "Area Chair workflow skills for the OpenReview MCP server (requires that server to be registered): venue setup from the conference's own guidelines, batch sync and dashboard, verbatim-quote per-paper dossiers with rebuttal tracking and fact-checks, reviewer messaging drafted by subagents and fact-checked (a send-gate hook blocks unverified or unapproved sends), and meta-review TL;DR plus refine.",
+  "author": {
+    "name": "Pau Rodriguez"
+  },
+  "license": "MIT",
+  "keywords": [
+    "openreview",
+    "area-chair",
+    "peer-review",
+    "meta-review"
+  ],
+  "skills": [
+    "./skills/openreview-ac-venue-setup",
+    "./skills/openreview-ac-sync",
+    "./skills/openreview-ac-dossier",
+    "./skills/openreview-ac-messages",
+    "./skills/openreview-ac-metareview"
+  ],
+  "hooks": "./hooks/hooks.json"
+}

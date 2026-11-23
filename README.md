@@ -41,6 +41,53 @@ A powerful [Model Context Protocol](https://modelcontextprotocol.io/) server for
 - **Batch Download Attachments**: Download attachments (e.g., all author rebuttals) across all assigned papers for Reviewers or ACs (`download_batch_attachments`).
 - **Batch Download PDFs**: Download full paper PDFs for assigned papers (`download_batch_pdfs`).
 
+## 🧭 Area Chair Workflow Skills (Claude Code)
+
+`skills/` holds conference-agnostic Agent Skills for the discussion and decision phases. `.claude-plugin/plugin.json` packages them as the `openreview` plugin.
+
+| skill | use it to |
+|---|---|
+| `openreview-ac-venue-setup` | ask for the current conference's AC, reviewer and author guidelines, and record the timeline, rating scale, forms and messaging rules in `venue_profile.md` |
+| `openreview-ac-sync` | re-dump all forums, diff against the last dump, extract revised PDFs (with a page-limit check), and regenerate the batch dashboard: markdown `00_dashboard.md` plus a self-contained per-paper `dashboard.html` (concerns grouped by validity, importance, status or reviewer, with verified resolutions and who shares each one; then disagreements, where each reviewer stands, and the verbatim thread) |
+| `openreview-ac-dossier` | build a per-paper dossier: a verbatim-quote concern ledger with severity, rebuttal mapping, reviewer follow-ups, PDF fact-checks and decision cruxes |
+| `openreview-ac-messages` | plan, draft (subagents), verify and fact-check forum threads that move reviewers to agreement, short emails that bring silent reviewers in, final-recommendation waves and chairs-only notes; send them only after explicit approval, through a send gate |
+| `openreview-ac-metareview` | produce a verbatim TL;DR, then audit the AC's own meta-review draft (supported, unsupported or contradicted), with minimal edits |
+
+Design rules:
+- **Verbatim first.** All reviewer, author and PDF text is stored as quote objects. `verify_quotes.py` checks that each one exists in a note signed by the claimed person, or on the stated PDF page.
+- **The skills never send anything** without a dry run and the user's explicit approval.
+- **Messages are drafted by subagents and fact-checked.** Each draft has a claims file that maps every factual sentence to its evidence. `messages.py verify` checks the claims mechanically:
+  - quotes are verbatim, correctly attributed, and from notes the recipients can read;
+  - "latest comment" quotes really are the reviewer's latest;
+  - ratings and dossier verdicts are current;
+  - author-reply pointers are correct.
+
+  It also requires an independent fact-checker's pass for the exact text, and then records "verified" in `ac_discussion/messages/ledger.jsonl`.
+- **Fair to the paper.** Only verified concerns are presented, partly true ones get pushback with PDF evidence, and reviewers are pointed to author replies they have not answered.
+- **The send gate (`hooks/send_gate.py`, registered in `hooks/hooks.json`).** A PreToolUse hook on the OpenReview send tools. It blocks a real send unless the exact text and subject are verified and approved in the ledger, the user's own message names the id with "send", and the target is right (the paper's invitation or forum, the anonymous Area_Chair signature, the verified recipients, no Authors readers). Bulk send tools are always blocked. Without the plugin installed, run it by hand before a send: `python3 -I hooks/send_gate.py <<< '<tool-call JSON>'` (exit 0 = allowed).
+- **Scripts are stdlib-only Python**, run with `python3 -I`. They need poppler (`pdftotext`, `pdfinfo`) for the PDF steps.
+
+### Discussion-phase playbook (one pass, any OpenReview venue)
+
+1. **`openreview-ac-venue-setup`:** paste or link the venue's AC, reviewer and author guidelines to get `venue_profile.md`.
+2. **`openreview-ac-sync`:** dump all forums, download and extract the revised PDFs, then build `00_dashboard.md` and `dashboard.html`.
+3. **`openreview-ac-dossier`:** one dossier per paper, built by parallel subagents. The quotes are verified, and each concern's validity and resolution are checked against the paper.
+4. **`openreview-ac-messages`, wave 1 (discussion):**
+   1. red-flag scan;
+   2. `plan_wave.py`;
+   3. drafting subagents;
+   4. mechanical verify;
+   5. fact-check subagents (Haiku is fine);
+   6. review with the user (escaped review file and dashboard);
+   7. send the threads, then the emails, with `send-plan`, `print-args`, `gate` and `log-sent`.
+5. **Follow-up:** sync every 2 or 3 days; when the deadline nears, run a `--wave-goal final` wave asking for explicit accept or reject.
+6. **`openreview-ac-metareview`:** a verbatim TL;DR, then the AC writes the meta-review and the skill audits it.
+
+To use the skills without installing the plugin, symlink them into Claude Code:
+```bash
+for s in skills/openreview-ac-*; do ln -s "$PWD/$s" ~/.claude/skills/; done
+```
+
 ## 🛠️ Installation
 
 ```bash

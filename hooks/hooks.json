@@ -1,0 +1,17 @@
+{
+  "description": "openreview plugin: block real OpenReview sends unless the exact text was verified (truth checks) and explicitly approved by the user; bulk send tools are blocked.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__.*openreview.*__(send_bulk_message|post_forum_message|batch_post_forum_messages|send_reminders)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I ${CLAUDE_PLUGIN_ROOT}/hooks/send_gate.py",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

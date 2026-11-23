@@ -25,7 +25,8 @@ The primary goal for an AC is to ensure reviews are submitted on time.
    - **Wait for user approval** before final send.
 
 5. **Emergency Reviewers**:
-   - Use `get_top_10_emergency_reviewers(venue_id, forum_id)` to find the best available reviewers for a paper based on affinity score, quota, and recent publications (uses OpenReview data natively with a Scholar fallback).
+   - Use `get_reviewer_candidates(venue_id, forum_id)` to list the best available reviewers for a paper. It matches the Action Editor assignment browser: affinity-ordered, with assignments, custom max papers, pending reviews and availability, and the same availability/pending/quota filters. Set `recent_papers` to include recent titles for topical-fit checks. It is read-only and caches the venue-wide tables for 5 minutes to stay within rate limits.
+   - `get_top_10_emergency_reviewers` is the older variant (Scholar fallback for recent papers); its quota check is ineffective, so do not rely on it for assignment decisions.
    - Summarize the candidates and their recent publications for the user to make a selection.
    - Once the user selects the best candidate, use `invite_reviewer(venue_id, forum_id, reviewer_id)` to officially send the invitation.
 

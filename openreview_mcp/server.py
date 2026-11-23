@@ -3298,6 +3298,11 @@ def get_top_10_emergency_reviewers(venue_id: str, forum_id: str) -> Dict[str, Li
     """
     Find the top-10 reviewers with the highest affinity for a given paper that haven't reached their reviewing quota.
     Returns a mapping of {reviewer_profile_id: [recent_paper_titles_from_openreview]}.
+
+    NOTE: the load check below reads per-reviewer Assignment edges, which come back
+    empty for most reviewers, so it never excludes anyone, and availability and
+    pending reviews are ignored. For assignment decisions on TMLR-style venues use
+    `get_reviewer_candidates`, which matches the assignment browser.
     """
     client = get_client()
 
@@ -3409,8 +3414,218 @@ def get_top_10_emergency_reviewers(venue_id: str, forum_id: str) -> Dict[str, Li
                         print(f"Scholar fallback failed for {author_query}: {e}")
 
         result[profile_id] = titles
-        
+
     return result
+
+
+def _edges_by_tail(client: Any, invitation: str, **kwargs: Any) -> Dict[str, Any]:
+    """Map tail -> edge for an edge invitation; {} if it does not exist for this venue.
+
+    Some invitations (e.g. ``Pending_Reviews``, ``Assignment_Availability``) only
+    exist on journal-style venues such as TMLR, so a 404 is not an error here.
+    """
+    try:
+        edges = client.get_all_edges(invitation=invitation, **kwargs)
+    except OpenReviewException as e:
+        err = e.args[0] if e.args else {}
+        if isinstance(err, dict) and (
+            err.get("status") == 404 or err.get("name") == "NotFoundError"
+        ):
+            return {}
+        raise
+    return {e.tail: e for e in edges}
+
+
+def _profile_current_position(profile: Any) -> Dict[str, Optional[str]]:
+    """Current (open-ended, else most recent) position and institution of a v2 profile."""
+    history = [h for h in ((profile.content or {}).get("history") or []) if isinstance(h, dict)]
+    current = [h for h in history if not h.get("end")]
+    pool = current or sorted(history, key=lambda h: h.get("end") or 0, reverse=True)
+    if not pool:
+        return {"position": None, "institution": None}
+    h = pool[0]
+    inst = h.get("institution") or {}
+    name = inst.get("name")
+    domain = inst.get("domain")
+    return {
+        "position": h.get("position"),
+        "institution": f"{name} ({domain})" if name and domain else (name or domain),
+    }
+
+
+def _note_title(note: Any) -> Optional[str]:
+    content = getattr(note, "content", None)
+    if isinstance(content, dict):
+        title = content.get("title")
+        if isinstance(title, dict):
+            title = title.get("value")
+        return title or None
+    return None
+
+
+DEFAULT_REVIEWER_MAX_PAPERS = 6  # TMLR `reviewers_max_papers`; used when no Custom_Max_Papers edge
+_REVIEWER_LOAD_TTL_S = 300
+_REVIEWER_LOAD_CACHE: Dict[str, Any] = {}
+
+
+def _venue_reviewer_load(client: Any, venue_id: str) -> Dict[str, Any]:
+    """Venue-wide reviewer load tables, i.e. the data the assignment browser loads.
+
+    These are independent of the paper, and downloading them costs ~15 throttled
+    API requests, so they are cached for a few minutes: scoring several papers in
+    a row downloads them once.
+    """
+    hit = _REVIEWER_LOAD_CACHE.get(venue_id)
+    if hit and time.time() - hit[0] < _REVIEWER_LOAD_TTL_S:
+        return hit[1]
+
+    reviewers_id = f"{venue_id}/Reviewers"
+    load = {
+        "unavailable": set(
+            _edges_by_tail(
+                client, f"{reviewers_id}/-/Assignment_Availability", label="Unavailable"
+            )
+        ),
+        "pending": {
+            t: int(e.weight or 0)
+            for t, e in _edges_by_tail(client, f"{reviewers_id}/-/Pending_Reviews").items()
+        },
+        "custom_max": {
+            t: int(e.weight)
+            for t, e in _edges_by_tail(client, f"{reviewers_id}/-/Custom_Max_Papers").items()
+            if e.weight is not None
+        },
+        # Per-reviewer Assignment edges are not readable for most reviewers; the
+        # grouped count is what the browser shows as "Assignments".
+        "assignments": {
+            g["id"]["tail"]: g["count"]
+            for g in client.get_grouped_edges(
+                invitation=f"{reviewers_id}/-/Assignment",
+                groupby="tail",
+                select="count",
+                domain=venue_id,
+            )
+        },
+    }
+    _REVIEWER_LOAD_CACHE[venue_id] = (time.time(), load)
+    return load
+
+
+@mcp.tool()
+@retry_on_429()
+def get_reviewer_candidates(
+    venue_id: str,
+    forum_id: str,
+    limit: int = 10,
+    max_pending_reviews: Optional[int] = 0,
+    include_unavailable: bool = False,
+    include_at_quota: bool = False,
+    recent_papers: int = 5,
+) -> List[Dict[str, Any]]:
+    """
+    Reviewer candidates for one paper, in the same order and with the same
+    numbers as the Action Editor / Area Chair "Assignments for <paper>" browser.
+
+    Candidates are sorted by affinity score (descending). Like the browser's
+    "Show reviewers available for assignment" box, reviewers are skipped when they
+    have a conflict on this paper, are marked Unavailable, have more than
+    `max_pending_reviews` pending reviews (default 0; None disables), or are at
+    quota (assignments >= custom max papers). Use `include_unavailable` /
+    `include_at_quota` to keep those. Pending-review and availability data exist
+    only on journal venues such as TMLR; elsewhere those filters are no-ops.
+
+    Each entry: `rank`, `id`, `name`, `position`, `institution`,
+    `affinity_score`, `assignments` (the browser's "Assignments"),
+    `custom_max_papers` (browser's "Custom Max Papers"; venue default if unset),
+    `at_quota`, `pending_reviews`, `availability`, and `recent_papers` (up to
+    `recent_papers` distinct titles, newest first; 0 skips the publication lookup).
+
+    Venue-wide load tables are cached for 5 minutes (rate-limit friendly), so
+    counts can lag a just-made assignment by up to that long. Unlike
+    `get_top_10_emergency_reviewers`, this returns affinity scores and counts and
+    applies the availability, pending-review and quota filters.
+    """
+    client = get_client()
+    reviewers_id = f"{venue_id}/Reviewers"
+
+    affinity_edges = client.get_all_edges(
+        invitation=f"{reviewers_id}/-/Affinity_Score", head=forum_id
+    )
+    if not affinity_edges:
+        return []
+    affinity_edges.sort(key=lambda e: getattr(e, "weight", None) or 0, reverse=True)
+
+    conflicted = {
+        e.tail
+        for e in client.get_all_edges(
+            invitation=f"{reviewers_id}/-/Conflict", head=forum_id
+        )
+    }
+    load = _venue_reviewer_load(client, venue_id)
+
+    selected: List[Dict[str, Any]] = []
+    for edge in affinity_edges:
+        if len(selected) >= limit:
+            break
+        rid = edge.tail
+        if rid in conflicted:
+            continue
+        is_unavailable = rid in load["unavailable"]
+        if is_unavailable and not include_unavailable:
+            continue
+        n_pending = load["pending"].get(rid, 0)
+        if max_pending_reviews is not None and n_pending > max_pending_reviews:
+            continue
+        n_assigned = load["assignments"].get(rid, 0)
+        quota = load["custom_max"].get(rid, DEFAULT_REVIEWER_MAX_PAPERS)
+        at_quota = n_assigned >= quota
+        if at_quota and not include_at_quota:
+            continue
+        selected.append(
+            {
+                "rank": len(selected) + 1,
+                "id": rid,
+                "affinity_score": edge.weight,
+                "assignments": n_assigned,
+                "custom_max_papers": quota,
+                "at_quota": at_quota,
+                "pending_reviews": n_pending,
+                "availability": "Unavailable" if is_unavailable else "Available",
+            }
+        )
+
+    if not selected:
+        return []
+
+    profiles = {
+        p.id: p
+        for p in openreview.tools.get_profiles(
+            client,
+            ids_or_emails=[c["id"] for c in selected],
+            with_publications=recent_papers > 0,
+        )
+    }
+    for c in selected:
+        p = profiles.get(c["id"])
+        c["name"] = _profile_preferred_name(p) if p else None
+        c.update(_profile_current_position(p) if p else {"position": None, "institution": None})
+        if recent_papers > 0:
+            pubs = list((p.content or {}).get("publications", [])) if p else []
+            pubs.sort(
+                key=lambda n: getattr(n, "cdate", 0) or getattr(n, "pdate", 0) or 0,
+                reverse=True,
+            )
+            titles: List[str] = []
+            seen = set()
+            for n in pubs:
+                t = _note_title(n)
+                if t and t.lower() not in seen:
+                    seen.add(t.lower())
+                    titles.append(t)
+                if len(titles) >= recent_papers:
+                    break
+            c["recent_papers"] = titles
+    return selected
 
 
 @mcp.tool()

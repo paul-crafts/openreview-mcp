@@ -22,10 +22,11 @@ def make_client(
     pending=0,
     assigned=1,
     max_papers=6,
+    venueid="TMLR/Under_Review",
 ):
     c = MagicMock()
     c.profile.id = "~Pau_Rodriguez_Lopez1"
-    c.get_note.return_value = SimpleNamespace(number=42)
+    c.get_note.return_value = SimpleNamespace(number=42, content={"venueid": {"value": venueid}})
 
     def get_groups(**kw):
         if "prefix" in kw:
@@ -98,6 +99,7 @@ def test_posts_edge_when_not_dry_run():
     "kwargs, fragment",
     [
         ({"ae_group": False}, "not this paper's Action Editor"),
+        ({"venueid": "TMLR/Assigned_AE"}, "Review Approval"),
         ({"in_pool": False}, "not in TMLR/Reviewers"),
         ({"already": True}, "already assigned"),
         ({"conflict": True}, "conflict"),

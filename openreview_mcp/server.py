@@ -3672,6 +3672,15 @@ def assign_reviewer(
     note = client.get_note(forum_id)
     number = note.number
 
+    # TMLR rejects assignments until the Action Editor approves the paper for review
+    # (Review_Approval); until then the paper sits at <venue>/Assigned_AE.
+    venueid = ((getattr(note, "content", None) or {}).get("venueid") or {}).get("value")
+    if venueid == f"{venue_id}/Assigned_AE":
+        reasons.append(
+            "paper is still at 'Assigned AE': submit your Review Approval "
+            "('Appropriate for Review') before assigning reviewers"
+        )
+
     ae_groups = client.get_groups(
         prefix=f"{venue_id}/Paper{number}/Action_Editor_", signatory=client.profile.id
     )

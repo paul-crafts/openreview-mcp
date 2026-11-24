@@ -28,6 +28,7 @@ A Model Context Protocol (MCP) server for interacting with OpenReview.net API v2
 - `get_profiles`: Display name and preferred email for a list of `~Name1` IDs (generalizes `get_profile`).
 - `get_reviewer_candidates`: Reviewer candidates for one paper, ordered by affinity, with the numbers the assignment browser shows (affinity score, assignments, custom max papers, pending reviews, availability) and the browser's availability/pending/quota filters; optional recent paper titles. Read-only.
 - `assign_reviewer`: Assign a pool reviewer to a paper (the browser's Assign button; TMLR). `dry_run=True` by default: runs all checks and shows the edge, writes nothing. Refuses on conflict, unavailable, pending reviews, at quota, already assigned, or not in the pool.
+- `unassign_reviewer`: Remove a reviewer's assignment (undo of `assign_reviewer`); `dry_run=True` by default; refuses if the reviewer already posted a review.
 - `submit_review_approval`: TMLR Action Editor's Review Approval (`Appropriate for Review` / `Desk Reject`). `dry_run=True` by default; editorial and irreversible, so only post after the user explicitly chooses. Papers stay at `Assigned_AE` (no reviewer assignment possible) until it is submitted.
 - `get_ac_updates`: Get new reviews/comments for papers you chair (supports `since`).
 - `get_reviewer_updates`: Get new comments/rebuttals for papers you review (supports `since`).

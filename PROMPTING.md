@@ -29,6 +29,7 @@ The primary goal for an AC is to ensure reviews are submitted on time.
    - `get_top_10_emergency_reviewers` is the older variant (Scholar fallback for recent papers); its quota check is ineffective, so do not rely on it for assignment decisions.
    - Summarize the candidates and their recent publications for the user to make a selection.
    - Once the user selects the best candidate: for a reviewer already in the pool (TMLR), call `assign_reviewer(venue_id, forum_id, reviewer_id)` with the default `dry_run=True` first, show the preview, and only then call it again with `dry_run=False` after the user's approval. Use `invite_reviewer(venue_id, forum_id, reviewer_id)` only for people outside the pool.
+   - To undo an assignment, `unassign_reviewer` (same dry-run-first rule). On TMLR see `skills/openreview-venue-tmlr` for the stage rules and the Review Approval desk-check (`scripts/desk_check.py`).
 
 6. **Forum Messages (Official Comments)**:
    - Use `get_forum_message_options(venue_id, submission_id_or_number)` to check allowed readers, anonymous reviewer groups, and AC signature for an assigned paper or the batch.

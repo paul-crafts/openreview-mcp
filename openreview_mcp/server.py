@@ -3749,6 +3749,87 @@ def assign_reviewer(
 
 @mcp.tool()
 @retry_on_429()
+def unassign_reviewer(
+    venue_id: str,
+    forum_id: str,
+    reviewer_id: str,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """
+    Remove a reviewer's assignment from a paper on Action Editor venues such as
+    TMLR (undo of `assign_reviewer`): re-posts the `<venue>/Reviewers/-/Assignment`
+    edge with a deletion date, signed with your Action Editor group.
+
+    ALWAYS run with `dry_run=True` (the default) first; nothing is written then.
+    Best done soon after assigning, before the reviewer has acted on it.
+
+    Refuses (status "refused", with `reasons`) when: you are not the paper's
+    Action Editor, the reviewer is not currently assigned to the paper, or the
+    reviewer has already posted a review (the venue forbids removing those).
+
+    Returns `{"status": "dry_run" | "unassigned" | "refused", "reasons", "edge"}`.
+    """
+    client = get_client()
+    reviewers_id = f"{venue_id}/Reviewers"
+    assignment_inv = f"{reviewers_id}/-/Assignment"
+    reasons: List[str] = []
+
+    note = client.get_note(forum_id)
+    number = note.number
+
+    ae_groups = client.get_groups(
+        prefix=f"{venue_id}/Paper{number}/Action_Editor_", signatory=client.profile.id
+    )
+    signature = ae_groups[0].id if ae_groups else None
+    if not signature:
+        reasons.append(
+            f"no Action Editor signature group for you on Paper{number}: "
+            "you are not this paper's Action Editor"
+        )
+
+    edges = client.get_edges(invitation=assignment_inv, head=forum_id, tail=reviewer_id)
+    if not edges:
+        reasons.append("reviewer is not currently assigned to this paper")
+
+    # The venue refuses to remove an assignment whose reviewer already posted a review.
+    reviews = client.get_notes(invitation=f"{venue_id}/Paper{number}/-/Review") if edges else []
+    if reviews:
+        anon = client.get_groups(
+            prefix=f"{venue_id}/Paper{number}/Reviewer_", signatory=reviewer_id
+        )
+        if anon and any(r.signatures and r.signatures[0] == anon[0].id for r in reviews):
+            reasons.append("reviewer has already posted a review; the venue forbids removing it")
+
+    result: Dict[str, Any] = {
+        "status": "refused" if reasons else "dry_run",
+        "paper_number": number,
+        "reviewer": reviewer_id,
+        "reasons": reasons,
+        "edge": {
+            "invitation": assignment_inv,
+            "head": forum_id,
+            "tail": reviewer_id,
+            "action": "delete (set ddate)",
+            "signatures": [signature] if signature else [],
+        },
+    }
+    if reasons or dry_run:
+        return result
+
+    edge = edges[0]
+    edge.ddate = int(time.time() * 1000)
+    edge.signatures = [signature]
+    client.post_edge(edge)
+    load = _REVIEWER_LOAD_CACHE.get(venue_id)
+    if load:  # keep the cached counts honest without re-downloading
+        counts = load[1]["assignments"]
+        counts[reviewer_id] = max(0, counts.get(reviewer_id, 1) - 1)
+    result["status"] = "unassigned"
+    return result
+
+
+@mcp.tool()
+@retry_on_429()
 def submit_review_approval(
     venue_id: str,
     forum_id: str,

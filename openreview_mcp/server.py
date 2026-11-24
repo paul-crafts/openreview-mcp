@@ -3630,9 +3630,114 @@ def get_reviewer_candidates(
 
 @mcp.tool()
 @retry_on_429()
+def assign_reviewer(
+    venue_id: str,
+    forum_id: str,
+    reviewer_id: str,
+    dry_run: bool = True,
+    allow_at_quota: bool = False,
+) -> Dict[str, Any]:
+    """
+    Assign a reviewer who is already in the venue's reviewer pool to a paper, on
+    Action Editor venues such as TMLR. This is the "Assign" button of the
+    assignment browser: it posts a `<venue>/Reviewers/-/Assignment` edge signed
+    with your Action Editor group for the paper. The reviewer is notified by the
+    venue. For people OUTSIDE the pool (external recruits) use `invite_reviewer`.
+
+    ALWAYS run with `dry_run=True` (the default) first. The dry run performs every
+    check and returns the exact edge that would be posted; nothing is written.
+
+    Refuses (status "refused", with `reasons`) when: you are not the paper's
+    Action Editor, the reviewer is not in the pool, is already assigned, has a
+    conflict on this paper, is marked Unavailable, has pending reviews, or is at
+    quota (assignments >= custom max papers; override with `allow_at_quota=True`).
+    The venue re-checks conflicts, availability and pending reviews server-side.
+
+    Returns `{"status": "dry_run" | "assigned" | "refused", "reasons", "checks", "edge"}`.
+    """
+    client = get_client()
+    reviewers_id = f"{venue_id}/Reviewers"
+    assignment_inv = f"{reviewers_id}/-/Assignment"
+    reasons: List[str] = []
+
+    note = client.get_note(forum_id)
+    number = note.number
+
+    ae_groups = client.get_groups(
+        prefix=f"{venue_id}/Paper{number}/Action_Editor_", signatory=client.profile.id
+    )
+    signature = ae_groups[0].id if ae_groups else None
+    if not signature:
+        reasons.append(
+            f"no Action Editor signature group for you on Paper{number}: "
+            "you are not this paper's Action Editor"
+        )
+
+    in_pool = bool(client.get_groups(id=reviewers_id, member=reviewer_id))
+    if not in_pool:
+        reasons.append(
+            f"{reviewer_id} is not in {reviewers_id}; use invite_reviewer for outside reviewers"
+        )
+    if client.get_edges(invitation=assignment_inv, head=forum_id, tail=reviewer_id):
+        reasons.append("already assigned to this paper")
+    if client.get_edges(invitation=f"{reviewers_id}/-/Conflict", head=forum_id, tail=reviewer_id):
+        reasons.append("conflict of interest with this paper")
+
+    load = _venue_reviewer_load(client, venue_id)
+    unavailable = reviewer_id in load["unavailable"]
+    n_pending = load["pending"].get(reviewer_id, 0)
+    n_assigned = load["assignments"].get(reviewer_id, 0)
+    quota = load["custom_max"].get(reviewer_id, DEFAULT_REVIEWER_MAX_PAPERS)
+    at_quota = n_assigned >= quota
+    if unavailable:
+        reasons.append("reviewer is marked Unavailable")
+    if n_pending > 0:
+        reasons.append(f"reviewer has {n_pending} pending review(s)")
+    if at_quota and not allow_at_quota:
+        reasons.append(
+            f"reviewer is at quota ({n_assigned}/{quota}); pass allow_at_quota=True to override"
+        )
+
+    edge_fields = {
+        "invitation": assignment_inv,
+        "head": forum_id,
+        "tail": reviewer_id,
+        "weight": 1,
+        "signatures": [signature] if signature else [],
+    }
+    result: Dict[str, Any] = {
+        "status": "refused" if reasons else "dry_run",
+        "paper_number": number,
+        "reviewer": reviewer_id,
+        "reasons": reasons,
+        "checks": {
+            "in_pool": in_pool,
+            "assignments": n_assigned,
+            "custom_max_papers": quota,
+            "pending_reviews": n_pending,
+            "availability": "Unavailable" if unavailable else "Available",
+        },
+        "edge": edge_fields,
+    }
+    if reasons or dry_run:
+        return result
+
+    client.post_edge(Edge(**edge_fields))
+    # keep the cached load table honest without re-downloading it
+    load["assignments"][reviewer_id] = n_assigned + 1
+    result["status"] = "assigned"
+    return result
+
+
+@mcp.tool()
+@retry_on_429()
 def invite_reviewer(venue_id: str, forum_id: str, reviewer_id: str) -> str:
     """
     Invite a specific reviewer to review a given paper using the Invite_Assignment edge.
+
+    NOTE: on Action Editor venues (TMLR) this edge is for recruiting people OUTSIDE the
+    reviewer pool, and the signature/readers below follow Area Chair naming. For a
+    reviewer who is already in the pool, use `assign_reviewer` instead.
     """
     client = get_client()
 

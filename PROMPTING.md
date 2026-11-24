@@ -28,7 +28,7 @@ The primary goal for an AC is to ensure reviews are submitted on time.
    - Use `get_reviewer_candidates(venue_id, forum_id)` to list the best available reviewers for a paper. It matches the Action Editor assignment browser: affinity-ordered, with assignments, custom max papers, pending reviews and availability, and the same availability/pending/quota filters. Set `recent_papers` to include recent titles for topical-fit checks. It is read-only and caches the venue-wide tables for 5 minutes to stay within rate limits.
    - `get_top_10_emergency_reviewers` is the older variant (Scholar fallback for recent papers); its quota check is ineffective, so do not rely on it for assignment decisions.
    - Summarize the candidates and their recent publications for the user to make a selection.
-   - Once the user selects the best candidate, use `invite_reviewer(venue_id, forum_id, reviewer_id)` to officially send the invitation.
+   - Once the user selects the best candidate: for a reviewer already in the pool (TMLR), call `assign_reviewer(venue_id, forum_id, reviewer_id)` with the default `dry_run=True` first, show the preview, and only then call it again with `dry_run=False` after the user's approval. Use `invite_reviewer(venue_id, forum_id, reviewer_id)` only for people outside the pool.
 
 6. **Forum Messages (Official Comments)**:
    - Use `get_forum_message_options(venue_id, submission_id_or_number)` to check allowed readers, anonymous reviewer groups, and AC signature for an assigned paper or the batch.

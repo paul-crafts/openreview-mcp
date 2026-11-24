@@ -3749,6 +3749,128 @@ def assign_reviewer(
 
 @mcp.tool()
 @retry_on_429()
+def submit_review_approval(
+    venue_id: str,
+    forum_id: str,
+    decision: str = "Appropriate for Review",
+    comment: str = "",
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """
+    Submit the Action Editor's Review Approval for a paper on TMLR-style venues:
+    decide whether it is "Appropriate for Review" or should be "Desk Reject"ed.
+    Until this is submitted the paper stays at `<venue>/Assigned_AE` and reviewers
+    cannot be assigned (`assign_reviewer` refuses).
+
+    This is an editorial decision made in your name, and it is not reversible
+    (the form accepts one reply). "Appropriate for Review" releases the approval
+    to the authors and notifies them, moves the paper to Under Review and opens
+    the review invitations. "Desk Reject" requires a `comment` for the authors
+    and opens a desk-rejection approval task for the Editors in Chief.
+
+    ALWAYS run with `dry_run=True` (the default) first; it checks everything and
+    returns the exact note that would be posted, writing nothing. Only post for
+    real after the user has explicitly chosen the decision for that paper.
+
+    Refuses (status "refused", with `reasons`) when: the paper is not at
+    `<venue>/Assigned_AE`, you have no Action Editor group on it, the
+    invitation is missing or expired, an approval already exists, `decision` is
+    not allowed, or a Desk Reject has no comment.
+
+    Returns `{"status": "dry_run" | "submitted" | "refused", "reasons", "decision", "effects", "note"}`.
+    """
+    client = get_client()
+    reasons: List[str] = []
+
+    note = client.get_note(forum_id)
+    number = note.number
+    content = getattr(note, "content", None) or {}
+    title = (content.get("title") or {}).get("value")
+    venueid = (content.get("venueid") or {}).get("value")
+    inv_id = f"{venue_id}/Paper{number}/-/Review_Approval"
+
+    if venueid != f"{venue_id}/Assigned_AE":
+        reasons.append(
+            f"paper is at '{venueid}', not '{venue_id}/Assigned_AE': there is nothing to approve"
+        )
+
+    try:
+        inv = client.get_invitation(inv_id)
+    except OpenReviewException as e:
+        err = e.args[0] if e.args else {}
+        if isinstance(err, dict) and (err.get("status") == 404 or err.get("name") == "NotFoundError"):
+            inv = None
+        else:
+            raise
+    allowed = ["Appropriate for Review", "Desk Reject"]
+    if inv is None:
+        reasons.append(f"invitation {inv_id} does not exist")
+    else:
+        try:
+            allowed = inv.edit["note"]["content"]["under_review"]["value"]["param"]["enum"]
+        except (KeyError, TypeError):
+            pass
+        expdate = getattr(inv, "expdate", None)
+        if expdate and expdate < int(time.time() * 1000):
+            reasons.append(f"invitation {inv_id} has expired")
+    if decision not in allowed:
+        reasons.append(f"decision must be one of {allowed}, got {decision!r}")
+    if decision == "Desk Reject" and not comment.strip():
+        reasons.append("a Desk Reject needs a comment explaining the decision to the authors")
+
+    if inv is not None and client.get_notes(invitation=inv_id):
+        reasons.append("a Review Approval already exists for this paper (the form accepts one reply)")
+
+    ae_groups = client.get_groups(
+        prefix=f"{venue_id}/Paper{number}/Action_Editor_", signatory=client.profile.id
+    )
+    signature = ae_groups[0].id if ae_groups else None
+    if not signature:
+        reasons.append(
+            f"no Action Editor signature group for you on Paper{number}: "
+            "you are not this paper's Action Editor"
+        )
+
+    if decision == "Desk Reject":
+        effects = [
+            "opens a desk-rejection approval task for the Editors in Chief (due in 3 days)",
+            "the paper does not go under review unless that approval is declined",
+        ]
+    else:
+        effects = [
+            "releases this approval to the authors and notifies them",
+            "moves the paper to Under Review and opens the review/comment invitations",
+            "expires the Review_Approval form (one reply only), so it cannot be redone",
+        ]
+
+    note_content: Dict[str, Any] = {"under_review": {"value": decision}}
+    if comment.strip():
+        note_content["comment"] = {"value": comment}
+    result: Dict[str, Any] = {
+        "status": "refused" if reasons else "dry_run",
+        "paper_number": number,
+        "title": title,
+        "decision": decision,
+        "reasons": reasons,
+        "effects": effects,
+        "note": {
+            "invitation": inv_id,
+            "signatures": [signature] if signature else [],
+            "content": note_content,
+        },
+    }
+    if reasons or dry_run:
+        return result
+
+    client.post_note_edit(
+        invitation=inv_id, signatures=[signature], note=Note(content=note_content)
+    )
+    result["status"] = "submitted"
+    return result
+
+
+@mcp.tool()
+@retry_on_429()
 def invite_reviewer(venue_id: str, forum_id: str, reviewer_id: str) -> str:
     """
     Invite a specific reviewer to review a given paper using the Invite_Assignment edge.

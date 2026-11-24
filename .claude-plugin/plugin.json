@@ -16,7 +16,8 @@
     "./skills/openreview-ac-sync",
     "./skills/openreview-ac-dossier",
     "./skills/openreview-ac-messages",
-    "./skills/openreview-ac-metareview"
+    "./skills/openreview-ac-metareview",
+    "./skills/openreview-venue-tmlr"
   ],
   "hooks": "./hooks/hooks.json"
 }

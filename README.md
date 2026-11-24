@@ -180,3 +180,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 *Built with ❤️ for the research community.*
 
 [!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/paul.crafts)
+
+### Venue notes
+Venue-specific quirks (stages, edge names, which tools to use or avoid, rate-limit incidents) live in one skill per venue, for example `skills/openreview-venue-tmlr/`. When you learn something non-obvious about a venue, add it to that venue's skill; for a new venue, copy the structure of the TMLR one and register it in `.claude-plugin/plugin.json`.

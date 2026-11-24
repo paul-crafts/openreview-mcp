@@ -44,6 +44,7 @@ def make_client(
     server._REVIEWER_LOAD_CACHE[V] = (
         __import__("time").time(),
         {
+            "members": {REV} if in_pool else set(),
             "unavailable": {REV} if unavailable else set(),
             "pending": {REV: pending},
             "custom_max": {REV: max_papers},

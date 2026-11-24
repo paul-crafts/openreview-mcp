@@ -67,6 +67,9 @@ def client():
         f"{R}/-/Custom_Max_Papers": [edge("~at_quota1", 2), edge("~third1", 3)],
     }
     c = MagicMock()
+    c.get_group.return_value = SimpleNamespace(
+        members=["~at_quota1", "~pending1", "~conflict1", "~away1", "~top1", "~second1", "~third1"]
+    )
     c.get_all_edges.side_effect = lambda invitation, **kw: list(edges.get(invitation, []))
     c.get_grouped_edges.return_value = [
         {"id": {"tail": "~at_quota1"}, "count": 2},
@@ -165,7 +168,15 @@ def test_missing_journal_invitations_are_not_errors(profiles):
 
     c = MagicMock()
     c.get_all_edges.side_effect = get_all_edges
+    c.get_group.return_value = SimpleNamespace(members=["~top1"])
     c.get_grouped_edges.return_value = []
     with patch("openreview_mcp.server.get_client", return_value=c):
         res = get_reviewer_candidates("ICLR.cc/2027/Conference", FORUM, recent_papers=0)
+    assert [r["id"] for r in res] == ["~top1"]
+
+
+def test_non_members_are_skipped(client, profiles):
+    # affinity edges outlive pool membership (removed/archived reviewers)
+    client.get_group.return_value = SimpleNamespace(members=["~top1", "~third1"])
+    res = get_reviewer_candidates(V, FORUM, limit=10, recent_papers=0)
     assert [r["id"] for r in res] == ["~top1"]

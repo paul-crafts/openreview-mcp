@@ -3480,7 +3480,14 @@ def _venue_reviewer_load(client: Any, venue_id: str) -> Dict[str, Any]:
         return hit[1]
 
     reviewers_id = f"{venue_id}/Reviewers"
+    # Current pool members. Affinity edges outlive membership (removed or archived
+    # reviewers keep theirs), and the assignment browser lists only members.
+    try:
+        members: Optional[set] = set(client.get_group(reviewers_id).members or [])
+    except OpenReviewException:
+        members = None  # unknown: do not filter
     load = {
+        "members": members,
         "unavailable": set(
             _edges_by_tail(
                 client, f"{reviewers_id}/-/Assignment_Availability", label="Unavailable"
@@ -3569,6 +3576,8 @@ def get_reviewer_candidates(
             break
         rid = edge.tail
         if rid in conflicted:
+            continue
+        if load["members"] is not None and rid not in load["members"]:
             continue
         is_unavailable = rid in load["unavailable"]
         if is_unavailable and not include_unavailable:
@@ -3673,7 +3682,8 @@ def assign_reviewer(
             "you are not this paper's Action Editor"
         )
 
-    in_pool = bool(client.get_groups(id=reviewers_id, member=reviewer_id))
+    load = _venue_reviewer_load(client, venue_id)
+    in_pool = load["members"] is None or reviewer_id in load["members"]
     if not in_pool:
         reasons.append(
             f"{reviewer_id} is not in {reviewers_id}; use invite_reviewer for outside reviewers"
@@ -3683,7 +3693,6 @@ def assign_reviewer(
     if client.get_edges(invitation=f"{reviewers_id}/-/Conflict", head=forum_id, tail=reviewer_id):
         reasons.append("conflict of interest with this paper")
 
-    load = _venue_reviewer_load(client, venue_id)
     unavailable = reviewer_id in load["unavailable"]
     n_pending = load["pending"].get(reviewer_id, 0)
     n_assigned = load["assignments"].get(reviewer_id, 0)

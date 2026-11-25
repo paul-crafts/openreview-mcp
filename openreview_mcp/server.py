@@ -25,18 +25,38 @@ from openreview_mcp.rate_limiter import (
 # --- Rate Limit Handling ---
 
 
+def _is_token_expired(e: Exception) -> bool:
+    """True for OpenReview's 401 'TokenExpiredError' (login tokens last about a day)."""
+    if isinstance(e, OpenReviewException):
+        data = e.args[0] if e.args else {}
+        return isinstance(data, dict) and (
+            data.get("name") == "TokenExpiredError" or data.get("status") == 401
+        )
+    return False
+
+
 def retry_on_429(max_retries: int = 5):
-    """Decorator to automatically retry on OpenReview rate limits (429)."""
+    """Decorator to automatically retry on OpenReview rate limits (429).
+
+    Also re-authenticates once when the cached login token has expired: the
+    cached client is dropped, so the retry logs in again with the configured
+    credentials instead of failing until the server is restarted.
+    """
 
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
+            reauthenticated = False
             for i in range(max_retries):
                 try:
                     return func(*args, **kwargs)
                 except OpenReviewIPBannedError:
                     raise
                 except Exception as e:
+                    if not reauthenticated and _is_token_expired(e):
+                        reauthenticated = True
+                        _reset_client()
+                        continue
                     # Check for OpenReviewException with 429 status
                     is_429 = False
                     msg = str(e)
@@ -77,6 +97,13 @@ mcp = FastMCP("OpenReview MCP")
 
 # Global client cache
 _client_instance: Optional[OpenReviewClient] = None
+
+
+def _reset_client() -> None:
+    """Forget the cached client and token so the next get_client() logs in again."""
+    global _client_instance
+    _client_instance = None
+    clear_cached_token()
 
 
 @retry_on_429()
